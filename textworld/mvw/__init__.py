@@ -5,6 +5,16 @@ from textworld.mvw.curriculum import STAGE_SPECS
 from textworld.mvw.curriculum import StageSpec
 from textworld.mvw.curriculum import build_stage_game
 from textworld.mvw.curriculum import normalize_stage
+from textworld.mvw.dataset import StepRecord
+from textworld.mvw.dataset import collect_curriculum_dataset
+from textworld.mvw.dataset import collect_stage_dataset
+from textworld.mvw.dataset import load_dataset
+from textworld.mvw.dataset import save_dataset
+from textworld.mvw.learning import BeliefTrackerModel
+from textworld.mvw.learning import TransitionModel
+from textworld.mvw.learning import dump_training_report
+from textworld.mvw.learning import split_records
+from textworld.mvw.learning import summarize_training_run
 from textworld.mvw.models import BeliefState
 from textworld.mvw.models import ConsistencyVerifier
 from textworld.mvw.models import NoveltyDetector
@@ -21,17 +31,27 @@ __all__ = [
     "STAGE_ORDER",
     "STAGE_SPECS",
     "StageSpec",
+    "StepRecord",
     "BeliefState",
+    "BeliefTrackerModel",
     "ConsistencyVerifier",
     "NoveltyDetector",
     "OracleStateTracker",
     "RuleBasedExpansionPlanner",
     "SymbolicTransitionModel",
+    "TransitionModel",
     "WorldContext",
     "WorldPatch",
     "build_curriculum",
     "build_stage_game",
+    "collect_curriculum_dataset",
+    "collect_stage_dataset",
+    "dump_training_report",
     "evaluate_game",
     "evaluate_retention",
+    "load_dataset",
     "normalize_stage",
+    "save_dataset",
+    "split_records",
+    "summarize_training_run",
 ]
