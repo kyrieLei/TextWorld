@@ -20,6 +20,8 @@ from textworld.mvw.models import RuleBasedExpansionPlanner
 from textworld.mvw.models import SymbolicTransitionModel
 from textworld.mvw.models import WorldContext
 from textworld.mvw.models import fact_to_str
+from textworld.mvw.scenarios import apply_custom_goal
+from textworld.mvw.scenarios import apply_novelty_runtime
 
 
 def _request_infos() -> EnvInfos:
@@ -52,9 +54,10 @@ def evaluate_game(
     seed: int = 1234,
     expand: bool = False,
     llm_proposer=None,
+    novelty_scenario: str = None,
 ) -> Dict:
     stage_id = normalize_stage(stage)
-    game = build_stage_game(stage_id, seed=seed)
+    game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
     game_path = _save_temp_game(game)
     env = textworld.start(game_path, request_infos=_request_infos())
     tracker = OracleStateTracker()
@@ -75,6 +78,9 @@ def evaluate_game(
         predicted_violations = verifier.check(predicted)
 
         next_state, reward, done = env.step(command)
+        next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
+        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
+        done = bool(next_state.done)
         observed = tracker.observe(next_state.facts)
         signal = detector.detect(command, predicted, observed, supported, predicted_violations)
 
@@ -116,13 +122,15 @@ def evaluate_game(
     novelty_steps = sum(1 for trace in traces if trace["novel"])
     unresolved_novelty_steps = sum(1 for trace in traces if trace["novel"] and not trace["patch"])
     observed_violations = sum(len(trace["observed_violations"]) for trace in traces)
+    task_won = bool(current_state.won) and unresolved_novelty_steps == 0
     return {
         "stage": stage_id,
+        "novelty_scenario": game.metadata.get("novelty_scenario"),
         "known_stage": model_stage,
         "expand": expand,
-        "final_score": current_state.score,
+        "final_score": current_state.max_score if task_won else 0,
         "max_score": current_state.max_score,
-        "won": bool(current_state.won),
+        "won": task_won,
         "steps": len(traces),
         "novelty_steps": novelty_steps,
         "unresolved_novelty_steps": unresolved_novelty_steps,

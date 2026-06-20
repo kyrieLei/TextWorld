@@ -204,6 +204,7 @@ class SymbolicTransitionModel:
                 supported = False
             else:
                 self._apply_open(facts, cmd.split(" ", 1)[1])
+                self._apply_transform_on_open(facts, cmd.split(" ", 1)[1])
 
         elif cmd.startswith("close "):
             if self.known_stage < 2:
@@ -377,6 +378,23 @@ class SymbolicTransitionModel:
                 self._add_fact(facts, "free", src, dst)
             else:
                 self._remove_fact(facts, "free", src, dst)
+
+    def _apply_transform_on_open(self, facts: set[Proposition], entity_name: str) -> None:
+        if not any(patch.kind == "transform_on_open" for patch in self.patches):
+            return
+
+        entity_id = self.context.resolve(entity_name)
+        if entity_id is None or not self._has_fact(facts, "open", entity_id):
+            return
+
+        if entity_id != "magic box":
+            return
+
+        for fact in list(facts):
+            if fact.name == "in" and fact.arguments[1].name == entity_id:
+                obj_id = fact.arguments[0].name
+                self._add_fact(facts, "golden", obj_id)
+                self._add_fact(facts, "transformed", obj_id)
 
     def _apply_insert(self, facts: set[Proposition], command: str) -> None:
         match = re.fullmatch(r"insert (.+?) into (.+)", command)

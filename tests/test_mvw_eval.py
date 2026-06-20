@@ -24,3 +24,11 @@ def test_benchmark_exposes_idea_metrics():
     assert report["novelty_accommodation"] > 0.0
     assert report["counterfactual_accuracy"] == 1.0
     assert report["planning_improvement"] > 0.0
+
+
+def test_magic_box_benchmark_exposes_idea_metrics():
+    report = evaluate_benchmark("stage_4", novelty_stage="stage_5", novelty_scenario="magic_box", seed=2026)
+    assert report["old_world_retention"] is True
+    assert report["novelty_accommodation"] > 0.0
+    assert report["counterfactual_accuracy"] == 1.0
+    assert report["planning_improvement"] > 0.0

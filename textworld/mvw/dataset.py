@@ -18,6 +18,8 @@ from textworld.mvw.curriculum import STAGE_ORDER
 from textworld.mvw.curriculum import build_stage_game
 from textworld.mvw.curriculum import normalize_stage
 from textworld.mvw.models import fact_to_str
+from textworld.mvw.scenarios import apply_custom_goal
+from textworld.mvw.scenarios import apply_novelty_runtime
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,7 @@ def collect_stage_dataset(
     seed: int = 1234,
     policy_mix: float = 0.7,
     max_steps: Optional[int] = None,
+    novelty_scenario: str = None,
 ) -> list[StepRecord]:
     stage_id = normalize_stage(stage)
     rng = random.Random(seed)
@@ -80,7 +83,7 @@ def collect_stage_dataset(
 
     for game_index in range(num_games):
         game_seed = seed + game_index
-        game = build_stage_game(stage_id, seed=game_seed)
+        game = build_stage_game(stage_id, seed=game_seed, novelty_scenario=novelty_scenario)
         env = textworld.start(_save_temp_game(game), request_infos=_request_infos())
         state = env.reset()
         steps_budget = max_steps or max(8, 3 * max(1, len(game.metadata.get("walkthrough", []))))
@@ -97,6 +100,9 @@ def collect_stage_dataset(
                 command = rng.choice(admissible)
 
             next_state, _, done = env.step(command)
+            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
+            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
+            done = bool(next_state.done)
             dataset.append(
                 StepRecord(
                     stage=stage_id,
@@ -127,6 +133,7 @@ def collect_curriculum_dataset(
     num_games_per_stage: int = 16,
     seed: int = 1234,
     policy_mix: float = 0.7,
+    novelty_scenario: str = None,
 ) -> list[StepRecord]:
     stages = stages or STAGE_ORDER
     dataset: list[StepRecord] = []
@@ -137,6 +144,7 @@ def collect_curriculum_dataset(
                 num_games=num_games_per_stage,
                 seed=seed + 100 * index,
                 policy_mix=policy_mix,
+                novelty_scenario=novelty_scenario,
             )
         )
 

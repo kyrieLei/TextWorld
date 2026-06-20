@@ -36,3 +36,13 @@ def test_stage5_portal_needs_expansion_then_recovers():
     assert without_patch["unresolved_novelty_steps"] > 0
     assert with_patch["won"]
     assert with_patch["unresolved_novelty_steps"] == 0
+
+
+def test_stage5_magic_box_needs_expansion_then_recovers():
+    without_patch = evaluate_game("stage_5", known_stage="stage_4", seed=2026, expand=False, novelty_scenario="magic_box")
+    with_patch = evaluate_game("stage_5", known_stage="stage_4", seed=2026, expand=True, novelty_scenario="magic_box")
+
+    assert without_patch["novelty_steps"] > 0
+    assert without_patch["won"] is False
+    assert with_patch["won"]
+    assert with_patch["unresolved_novelty_steps"] == 0

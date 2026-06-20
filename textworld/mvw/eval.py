@@ -25,6 +25,9 @@ from textworld.mvw.models import WorldContext
 from textworld.mvw.models import WorldPatch
 from textworld.mvw.models import fact_to_str
 from textworld.mvw.runner import evaluate_game
+from textworld.mvw.scenarios import apply_custom_goal
+from textworld.mvw.scenarios import apply_novelty_runtime
+from textworld.mvw.scenarios import normalize_novelty_scenario
 
 
 @dataclass(frozen=True)
@@ -44,8 +47,11 @@ COUNTERFACTUAL_PROBES: Dict[str, tuple[CounterfactualProbe, ...]] = {
         CounterfactualProbe("stage_3", "open wooden door", False, "Locked doors should not open directly."),
         CounterfactualProbe("stage_3", "take old key from nightstand", True, "The key can be moved into inventory."),
     ),
-    "stage_5": (
+    "stage_5:portal": (
         CounterfactualProbe("stage_5", "use blue portal", True, "Using the portal should teleport the player."),
+    ),
+    "stage_5:magic_box": (
+        CounterfactualProbe("stage_5", "open magic box", True, "Opening the magic box should add transformed facts."),
     ),
 }
 
@@ -69,20 +75,22 @@ def _state_changed(before: Sequence[str], after: Sequence[str]) -> bool:
     return tuple(before) != tuple(after)
 
 
-def _make_model(stage: str, known_stage: str, patches: Sequence[WorldPatch] = ()) -> tuple[SymbolicTransitionModel, WorldContext]:
-    game = build_stage_game(stage)
+def _make_model(stage: str, known_stage: str, patches: Sequence[WorldPatch] = (), novelty_scenario: str = None) -> tuple[SymbolicTransitionModel, WorldContext]:
+    game = build_stage_game(stage, novelty_scenario=novelty_scenario)
     context = WorldContext(game)
     return SymbolicTransitionModel(context, int(known_stage.split("_")[-1]), patches), context
 
 
-def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union[int, str]] = None, expand: bool = False, seed: int = 1234) -> Dict:
+def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union[int, str]] = None, expand: bool = False, seed: int = 1234, novelty_scenario: str = None) -> Dict:
     stage_id = normalize_stage(stage)
     known_stage_id = normalize_stage(known_stage) if known_stage is not None else stage_id
-    probes = COUNTERFACTUAL_PROBES.get(stage_id, ())
+    scenario = normalize_novelty_scenario(novelty_scenario) if stage_id == "stage_5" else None
+    probe_key = "{}:{}".format(stage_id, scenario) if scenario is not None else stage_id
+    probes = COUNTERFACTUAL_PROBES.get(probe_key, ())
     if not probes:
         return {"stage": stage_id, "counterfactual_accuracy": 1.0, "probes": []}
 
-    game = build_stage_game(stage_id, seed=seed)
+    game = build_stage_game(stage_id, seed=seed, novelty_scenario=scenario)
     env = textworld.start(_save_temp_game(game), request_infos=_request_infos())
     state = env.reset()
     tracker = OracleStateTracker()
@@ -97,6 +105,8 @@ def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union
         for command in game.metadata.get("walkthrough", []):
             predicted, supported = model.predict(belief, command)
             next_state, _, _ = env.step(command)
+            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
+            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
             observed = tracker.observe(next_state.facts)
             signal = detector.detect(command, predicted, observed, supported, ())
             patch = planner.propose(signal)
@@ -117,6 +127,8 @@ def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union
         predicted_change = _state_changed(_facts_to_strings(state.facts), tuple(sorted(fact_to_str(fact) for fact in predicted_state.facts)))
 
         next_state, _, _ = env.step(probe.command)
+        next_state = apply_novelty_runtime(next_state, probe.command, game.metadata.get("novelty_scenario"))
+        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
         observed_change = _state_changed(_facts_to_strings(state.facts), _facts_to_strings(next_state.facts))
         is_correct = predicted_change == observed_change == probe.expect_state_change
         correct += int(is_correct)
@@ -143,9 +155,9 @@ def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union
     }
 
 
-def evaluate_novelty_accommodation(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234) -> Dict:
-    before = evaluate_game(stage, known_stage=base_known_stage, seed=seed, expand=False)
-    after = evaluate_game(stage, known_stage=base_known_stage, seed=seed, expand=True)
+def evaluate_novelty_accommodation(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None) -> Dict:
+    before = evaluate_game(stage, known_stage=base_known_stage, seed=seed, expand=False, novelty_scenario=novelty_scenario)
+    after = evaluate_game(stage, known_stage=base_known_stage, seed=seed, expand=True, novelty_scenario=novelty_scenario)
 
     def _performance(report: Dict) -> float:
         if not report["won"]:
@@ -165,9 +177,9 @@ def evaluate_novelty_accommodation(stage: Union[int, str] = "stage_5", base_know
     }
 
 
-def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234) -> Dict:
+def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None) -> Dict:
     stage_id = normalize_stage(stage)
-    game = build_stage_game(stage_id, seed=seed)
+    game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
     env = textworld.start(_save_temp_game(game), request_infos=_request_infos())
     tracker = OracleStateTracker()
     detector = NoveltyDetector()
@@ -181,6 +193,8 @@ def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stag
     for command in game.metadata.get("walkthrough", []):
         predicted, supported = model.predict(belief, command)
         next_state, _, _ = env.step(command)
+        next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
+        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
         observed = tracker.observe(next_state.facts)
         signal = detector.detect(command, predicted, observed, supported, ())
         patch = planner.propose(signal)
@@ -216,6 +230,11 @@ def _canonical_fact_string(fact, context: WorldContext) -> str:
 
 
 def _goal_reached(game, belief_state: BeliefState, context: WorldContext) -> bool:
+    custom_goal_facts = tuple(game.metadata.get("custom_goal_facts", ()))
+    if custom_goal_facts:
+        belief_fact_strings = {fact_to_str(fact) for fact in belief_state.facts}
+        return set(custom_goal_facts).issubset(belief_fact_strings)
+
     goal_fact_strings = set()
     for quest in game.quests:
         for event in quest.win_events:
@@ -236,10 +255,10 @@ def _candidate_commands(game, state) -> list[str]:
     return commands
 
 
-def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str]] = None, expand: bool = False, seed: int = 1234, max_depth: int = 4) -> Dict:
+def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str]] = None, expand: bool = False, seed: int = 1234, max_depth: int = 4, novelty_scenario: str = None) -> Dict:
     stage_id = normalize_stage(stage)
     known_stage_id = normalize_stage(known_stage) if known_stage is not None else stage_id
-    game = build_stage_game(stage_id, seed=seed)
+    game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
     env = textworld.start(_save_temp_game(game), request_infos=_request_infos())
     initial_state = env.reset()
     tracker = OracleStateTracker()
@@ -253,6 +272,8 @@ def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str
         for command in game.metadata.get("walkthrough", []):
             predicted, supported = model.predict(initial_belief, command)
             next_state, _, _ = env.step(command)
+            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
+            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
             observed = tracker.observe(next_state.facts)
             patch = planner.propose(detector.detect(command, predicted, observed, supported, ()))
             if patch is not None:
@@ -293,6 +314,7 @@ def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str
     env.close()
     return {
         "stage": stage_id,
+        "novelty_scenario": game.metadata.get("novelty_scenario"),
         "known_stage": known_stage_id,
         "expand": expand,
         "plan_success": plan is not None,
@@ -300,11 +322,12 @@ def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str
     }
 
 
-def evaluate_planning_improvement(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234) -> Dict:
-    before = plan_with_model(stage, known_stage=base_known_stage, expand=False, seed=seed)
-    after = plan_with_model(stage, known_stage=base_known_stage, expand=True, seed=seed)
+def evaluate_planning_improvement(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None) -> Dict:
+    before = plan_with_model(stage, known_stage=base_known_stage, expand=False, seed=seed, novelty_scenario=novelty_scenario)
+    after = plan_with_model(stage, known_stage=base_known_stage, expand=True, seed=seed, novelty_scenario=novelty_scenario)
     return {
         "stage": normalize_stage(stage),
+        "novelty_scenario": novelty_scenario,
         "known_stage": normalize_stage(base_known_stage),
         "performance_before": float(before["plan_success"]),
         "performance_after": float(after["plan_success"]),
@@ -314,7 +337,7 @@ def evaluate_planning_improvement(stage: Union[int, str] = "stage_5", base_known
     }
 
 
-def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, str] = "stage_5", seed: int = 1234) -> Dict:
+def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, str] = "stage_5", seed: int = 1234, novelty_scenario: str = None) -> Dict:
     known_stage_id = normalize_stage(known_stage)
     retention = {
         "known_stage": known_stage_id,
@@ -323,14 +346,15 @@ def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, s
             for idx, stage in enumerate(STAGE_ORDER[: int(known_stage_id.split("_")[-1]) + 1])
         ),
     }
-    accommodation = evaluate_novelty_accommodation(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed)
-    counterfactual = evaluate_counterfactuals(novelty_stage, known_stage=known_stage_id, expand=True, seed=seed)
-    rule_minimality = evaluate_rule_minimality(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed)
-    planning = evaluate_planning_improvement(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed)
+    accommodation = evaluate_novelty_accommodation(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario)
+    counterfactual = evaluate_counterfactuals(novelty_stage, known_stage=known_stage_id, expand=True, seed=seed, novelty_scenario=novelty_scenario)
+    rule_minimality = evaluate_rule_minimality(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario)
+    planning = evaluate_planning_improvement(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario)
     consistency = accommodation["after"]["observed_violation_count"] / max(1, accommodation["after"]["steps"])
     return {
         "known_stage": known_stage_id,
         "novelty_stage": normalize_stage(novelty_stage),
+        "novelty_scenario": novelty_scenario or ("portal" if normalize_stage(novelty_stage) == "stage_5" else None),
         "old_world_retention": retention["old_world_retention"],
         "novelty_accommodation": accommodation["novelty_accommodation"],
         "consistency_violation_rate": consistency,

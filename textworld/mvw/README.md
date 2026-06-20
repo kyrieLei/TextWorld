@@ -9,7 +9,7 @@ Stages:
 3. `stage_2`: containers and visibility/preconditions
 4. `stage_3`: locked doors and keys
 5. `stage_4`: cooking and cutting
-6. `stage_5`: portal novelty that requires a new transition rule
+6. `stage_5`: novelty scenarios such as `portal` and `magic_box`
 
 Main entrypoints:
 
@@ -21,6 +21,7 @@ Main entrypoints:
 ./.venv/bin/python scripts/tw-mvw evaluate --stage stage_5 --known-stage stage_4 --expand
 ./.venv/bin/python scripts/tw-mvw counterfactual --stage stage_5 --known-stage stage_4 --expand
 ./.venv/bin/python scripts/tw-mvw benchmark --known-stage stage_4
+./.venv/bin/python scripts/tw-mvw benchmark --known-stage stage_4 --novelty-scenario magic_box
 ./.venv/bin/python scripts/tw-mvw retention --known-stage stage_4
 ```
 
@@ -41,6 +42,11 @@ Learning pipeline:
 - rule minimality
 - counterfactual accuracy
 - planning improvement
+
+For `stage_5`, you can switch novelty families with `--novelty-scenario`:
+
+- `portal`: non-local transition edge
+- `magic_box`: opening the box adds `golden(apple)` and `transformed(apple)`
 
 `textworld.mvw.llm.OpenAICompatibleHypothesisProposer` is optional. It can be pointed at any OpenAI-compatible serving stack, including a locally served Qwen3 Instruct model.
 

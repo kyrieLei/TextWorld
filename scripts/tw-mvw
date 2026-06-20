@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_cmd.add_argument("--num-games", type=int, default=16, help="Number of games per stage.")
     collect_cmd.add_argument("--seed", type=int, default=1234, help="Base seed for collection.")
     collect_cmd.add_argument("--policy-mix", type=float, default=0.7, help="Probability of following the oracle policy when available.")
+    collect_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
 
     train_cmd = subparsers.add_parser("train", help="Train learned belief-tracking and transition baselines from a JSONL dataset.")
     train_cmd.add_argument("--dataset", required=True, help="JSONL dataset collected with the collect command.")
@@ -46,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.add_argument("--llm-base-url", help="Optional OpenAI-compatible endpoint, e.g. a local Qwen3 Instruct server.")
     eval_cmd.add_argument("--llm-model", default="Qwen/Qwen3-0.6B", help="Model name for the OpenAI-compatible endpoint.")
     eval_cmd.add_argument("--llm-api-key", help="Optional API key for the OpenAI-compatible endpoint.")
+    eval_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
 
     retention_cmd = subparsers.add_parser("retention", help="Evaluate old-world retention up to a stage.")
     retention_cmd.add_argument("--known-stage", required=True, help="Highest rule stage currently known by the model.")
@@ -56,11 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
     counterfactual_cmd.add_argument("--known-stage", help="Highest rule stage currently known by the model.")
     counterfactual_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
     counterfactual_cmd.add_argument("--expand", action="store_true", help="Apply novelty expansion before probing.")
+    counterfactual_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
 
     benchmark_cmd = subparsers.add_parser("benchmark", help="Run the idea.md metric suite for a known stage.")
     benchmark_cmd.add_argument("--known-stage", required=True, help="Highest rule stage currently known by the model.")
     benchmark_cmd.add_argument("--novelty-stage", default="stage_5", help="Stage used for novelty accommodation.")
     benchmark_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
+    benchmark_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
 
     return parser
 
@@ -77,9 +81,9 @@ def main() -> int:
 
     if args.command == "collect":
         if args.stage:
-            records = collect_stage_dataset(args.stage, num_games=args.num_games, seed=args.seed, policy_mix=args.policy_mix)
+            records = collect_stage_dataset(args.stage, num_games=args.num_games, seed=args.seed, policy_mix=args.policy_mix, novelty_scenario=args.novelty_scenario)
         else:
-            records = collect_curriculum_dataset(num_games_per_stage=args.num_games, seed=args.seed, policy_mix=args.policy_mix)
+            records = collect_curriculum_dataset(num_games_per_stage=args.num_games, seed=args.seed, policy_mix=args.policy_mix, novelty_scenario=args.novelty_scenario)
         save_dataset(records, args.output)
         print(args.output)
         print("records={}".format(len(records)))
@@ -99,15 +103,15 @@ def main() -> int:
                 model=args.llm_model,
                 api_key=args.llm_api_key,
             )
-        print(report_to_json(evaluate_game(args.stage, known_stage=args.known_stage, seed=args.seed, expand=args.expand, llm_proposer=proposer)))
+        print(report_to_json(evaluate_game(args.stage, known_stage=args.known_stage, seed=args.seed, expand=args.expand, llm_proposer=proposer, novelty_scenario=args.novelty_scenario)))
         return 0
 
     if args.command == "counterfactual":
-        print(report_to_json(evaluate_counterfactuals(args.stage, known_stage=args.known_stage, expand=args.expand, seed=args.seed)))
+        print(report_to_json(evaluate_counterfactuals(args.stage, known_stage=args.known_stage, expand=args.expand, seed=args.seed, novelty_scenario=args.novelty_scenario)))
         return 0
 
     if args.command == "benchmark":
-        print(report_to_json(evaluate_benchmark(args.known_stage, novelty_stage=args.novelty_stage, seed=args.seed)))
+        print(report_to_json(evaluate_benchmark(args.known_stage, novelty_stage=args.novelty_stage, seed=args.seed, novelty_scenario=args.novelty_scenario)))
         return 0
 
     print(report_to_json(evaluate_retention(args.known_stage, seed=args.seed)))

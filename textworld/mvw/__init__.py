@@ -29,6 +29,8 @@ from textworld.mvw.models import RuleBasedExpansionPlanner
 from textworld.mvw.models import SymbolicTransitionModel
 from textworld.mvw.models import WorldContext
 from textworld.mvw.models import WorldPatch
+from textworld.mvw.scenarios import NOVELTY_SCENARIOS
+from textworld.mvw.scenarios import normalize_novelty_scenario
 from textworld.mvw.runner import build_curriculum
 from textworld.mvw.runner import evaluate_game
 from textworld.mvw.runner import evaluate_retention
@@ -42,6 +44,7 @@ __all__ = [
     "BeliefTrackerModel",
     "ConsistencyVerifier",
     "NoveltyDetector",
+    "NOVELTY_SCENARIOS",
     "OracleStateTracker",
     "RuleBasedExpansionPlanner",
     "SymbolicTransitionModel",
@@ -62,6 +65,7 @@ __all__ = [
     "evaluate_rule_minimality",
     "load_dataset",
     "normalize_stage",
+    "normalize_novelty_scenario",
     "plan_with_model",
     "save_dataset",
     "split_records",
