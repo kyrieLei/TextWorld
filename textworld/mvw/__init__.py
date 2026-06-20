@@ -13,6 +13,7 @@ from textworld.mvw.dataset import save_dataset
 from textworld.mvw.eval import evaluate_benchmark
 from textworld.mvw.eval import evaluate_counterfactuals
 from textworld.mvw.eval import evaluate_novelty_accommodation
+from textworld.mvw.eval import evaluate_patch_transfer
 from textworld.mvw.eval import evaluate_planning_improvement
 from textworld.mvw.eval import evaluate_rule_minimality
 from textworld.mvw.eval import plan_with_model
@@ -60,6 +61,7 @@ __all__ = [
     "evaluate_counterfactuals",
     "evaluate_game",
     "evaluate_novelty_accommodation",
+    "evaluate_patch_transfer",
     "evaluate_planning_improvement",
     "evaluate_retention",
     "evaluate_rule_minimality",

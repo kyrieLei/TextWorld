@@ -105,8 +105,8 @@ def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union
         for command in game.metadata.get("walkthrough", []):
             predicted, supported = model.predict(belief, command)
             next_state, _, _ = env.step(command)
-            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
-            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
+            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"), game.metadata)
+            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
             observed = tracker.observe(next_state.facts)
             signal = detector.detect(command, predicted, observed, supported, ())
             patch = planner.propose(signal)
@@ -127,8 +127,8 @@ def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union
         predicted_change = _state_changed(_facts_to_strings(state.facts), tuple(sorted(fact_to_str(fact) for fact in predicted_state.facts)))
 
         next_state, _, _ = env.step(probe.command)
-        next_state = apply_novelty_runtime(next_state, probe.command, game.metadata.get("novelty_scenario"))
-        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
+        next_state = apply_novelty_runtime(next_state, probe.command, game.metadata.get("novelty_scenario"), game.metadata)
+        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
         observed_change = _state_changed(_facts_to_strings(state.facts), _facts_to_strings(next_state.facts))
         is_correct = predicted_change == observed_change == probe.expect_state_change
         correct += int(is_correct)
@@ -193,8 +193,8 @@ def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stag
     for command in game.metadata.get("walkthrough", []):
         predicted, supported = model.predict(belief, command)
         next_state, _, _ = env.step(command)
-        next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
-        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
+        next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"), game.metadata)
+        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
         observed = tracker.observe(next_state.facts)
         signal = detector.detect(command, predicted, observed, supported, ())
         patch = planner.propose(signal)
@@ -219,6 +219,87 @@ def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stag
             }
             for patch in patches
         ],
+    }
+
+
+def discover_rule_patches(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None) -> Dict:
+    stage_id = normalize_stage(stage)
+    game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
+    env = textworld.start(_save_temp_game(game), request_infos=_request_infos())
+    tracker = OracleStateTracker()
+    detector = NoveltyDetector()
+    planner = RuleBasedExpansionPlanner()
+    context = WorldContext(game)
+    model = SymbolicTransitionModel(context, int(normalize_stage(base_known_stage).split("_")[-1]))
+    state = env.reset()
+    belief = tracker.observe(state.facts)
+    patches: list[WorldPatch] = []
+
+    for command in game.metadata.get("walkthrough", []):
+        predicted, supported = model.predict(belief, command)
+        next_state, _, _ = env.step(command)
+        next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"), game.metadata)
+        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
+        observed = tracker.observe(next_state.facts)
+        signal = detector.detect(command, predicted, observed, supported, ())
+        patch = planner.propose(signal)
+        if patch is not None and all(existing.kind != patch.kind for existing in patches):
+            patches.append(patch)
+            model = model.with_patch(patch)
+        belief = observed
+
+    env.close()
+    return {
+        "stage": stage_id,
+        "novelty_scenario": game.metadata.get("novelty_scenario"),
+        "seed": seed,
+        "known_stage": normalize_stage(base_known_stage),
+        "num_patches": len(patches),
+        "patches": list(patches),
+        "patch_summaries": [
+            {
+                "name": patch.name,
+                "kind": patch.kind,
+                "description": patch.description,
+                "complexity": patch.complexity,
+                "new_entities": list(patch.new_entities),
+                "new_properties": list(patch.new_properties),
+                "rules": list(patch.rules),
+            }
+            for patch in patches
+        ],
+    }
+
+
+def evaluate_patch_transfer(
+    stage: Union[int, str] = "stage_5",
+    base_known_stage: Union[int, str] = "stage_4",
+    discovery_seed: int = 1234,
+    eval_seed: int = 1235,
+    novelty_scenario: str = None,
+) -> Dict:
+    discovered = discover_rule_patches(stage=stage, base_known_stage=base_known_stage, seed=discovery_seed, novelty_scenario=novelty_scenario)
+    before = evaluate_game(stage, known_stage=base_known_stage, seed=eval_seed, expand=False, novelty_scenario=novelty_scenario)
+    after = evaluate_game(
+        stage,
+        known_stage=base_known_stage,
+        seed=eval_seed,
+        expand=False,
+        novelty_scenario=novelty_scenario,
+        patches=tuple(discovered["patches"]),
+    )
+    return {
+        "stage": normalize_stage(stage),
+        "novelty_scenario": novelty_scenario,
+        "known_stage": normalize_stage(base_known_stage),
+        "discovery_seed": discovery_seed,
+        "eval_seed": eval_seed,
+        "transfer_success_before": float(before["won"]),
+        "transfer_success_after": float(after["won"]),
+        "transfer_improvement": float(after["won"]) - float(before["won"]),
+        "discovered": {key: value for key, value in discovered.items() if key != "patches"},
+        "before": before,
+        "after": after,
     }
 
 
@@ -272,8 +353,8 @@ def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str
         for command in game.metadata.get("walkthrough", []):
             predicted, supported = model.predict(initial_belief, command)
             next_state, _, _ = env.step(command)
-            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
-            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
+            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"), game.metadata)
+            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
             observed = tracker.observe(next_state.facts)
             patch = planner.propose(detector.detect(command, predicted, observed, supported, ()))
             if patch is not None:
@@ -350,6 +431,7 @@ def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, s
     counterfactual = evaluate_counterfactuals(novelty_stage, known_stage=known_stage_id, expand=True, seed=seed, novelty_scenario=novelty_scenario)
     rule_minimality = evaluate_rule_minimality(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario)
     planning = evaluate_planning_improvement(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario)
+    transfer = evaluate_patch_transfer(stage=novelty_stage, base_known_stage=known_stage_id, discovery_seed=seed, eval_seed=seed + 1, novelty_scenario=novelty_scenario)
     consistency = accommodation["after"]["observed_violation_count"] / max(1, accommodation["after"]["steps"])
     return {
         "known_stage": known_stage_id,
@@ -367,5 +449,6 @@ def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, s
             "counterfactual": counterfactual,
             "rule_minimality": rule_minimality,
             "planning": planning,
+            "transfer": transfer,
         },
     }

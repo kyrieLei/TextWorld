@@ -22,6 +22,7 @@ Main entrypoints:
 ./.venv/bin/python scripts/tw-mvw counterfactual --stage stage_5 --known-stage stage_4 --expand
 ./.venv/bin/python scripts/tw-mvw benchmark --known-stage stage_4
 ./.venv/bin/python scripts/tw-mvw benchmark --known-stage stage_4 --novelty-scenario magic_box
+./.venv/bin/python scripts/tw-mvw transfer --stage stage_5 --known-stage stage_4 --novelty-scenario magic_box --discovery-seed 2026 --eval-seed 2027
 ./.venv/bin/python scripts/tw-mvw retention --known-stage stage_4
 ```
 
@@ -32,6 +33,7 @@ Learning pipeline:
 - `evaluate`: symbolic baseline plus optional novelty expansion
 - `counterfactual`: explicit counterfactual probes such as "open locked door" or "use portal"
 - `benchmark`: the full metric suite from `idea.md`
+- `transfer`: discover a novelty patch on one game seed and reuse it on a held-out seed
 - `retention`: old-world retention audit across stages
 
 `benchmark` reports:
@@ -46,7 +48,7 @@ Learning pipeline:
 For `stage_5`, you can switch novelty families with `--novelty-scenario`:
 
 - `portal`: non-local transition edge
-- `magic_box`: opening the box adds `golden(apple)` and `transformed(apple)`
+- `magic_box`: opening the box adds `golden(x)` and `transformed(x)` for the seeded object inside the box
 
 `textworld.mvw.llm.OpenAICompatibleHypothesisProposer` is optional. It can be pointed at any OpenAI-compatible serving stack, including a locally served Qwen3 Instruct model.
 

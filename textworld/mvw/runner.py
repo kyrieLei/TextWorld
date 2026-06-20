@@ -6,6 +6,7 @@ from os.path import join as pjoin
 from typing import Dict
 from typing import Iterable
 from typing import Optional
+from typing import Sequence
 from typing import Union
 
 import textworld
@@ -18,6 +19,7 @@ from textworld.mvw.models import NoveltyDetector
 from textworld.mvw.models import OracleStateTracker
 from textworld.mvw.models import RuleBasedExpansionPlanner
 from textworld.mvw.models import SymbolicTransitionModel
+from textworld.mvw.models import WorldPatch
 from textworld.mvw.models import WorldContext
 from textworld.mvw.models import fact_to_str
 from textworld.mvw.scenarios import apply_custom_goal
@@ -55,6 +57,7 @@ def evaluate_game(
     expand: bool = False,
     llm_proposer=None,
     novelty_scenario: str = None,
+    patches: Sequence[WorldPatch] = (),
 ) -> Dict:
     stage_id = normalize_stage(stage)
     game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
@@ -65,7 +68,7 @@ def evaluate_game(
     detector = NoveltyDetector()
     context = WorldContext(game)
     model_stage = normalize_stage(known_stage) if known_stage is not None else stage_id
-    model = SymbolicTransitionModel(context, int(model_stage.split("_")[-1]))
+    model = SymbolicTransitionModel(context, int(model_stage.split("_")[-1]), patches=patches)
     planner = RuleBasedExpansionPlanner()
 
     current_state = env.reset()
@@ -78,8 +81,8 @@ def evaluate_game(
         predicted_violations = verifier.check(predicted)
 
         next_state, reward, done = env.step(command)
-        next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
-        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
+        next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"), game.metadata)
+        next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
         done = bool(next_state.done)
         observed = tracker.observe(next_state.facts)
         signal = detector.detect(command, predicted, observed, supported, predicted_violations)

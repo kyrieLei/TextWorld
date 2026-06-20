@@ -100,8 +100,8 @@ def collect_stage_dataset(
                 command = rng.choice(admissible)
 
             next_state, _, done = env.step(command)
-            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"))
-            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"))
+            next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"), game.metadata)
+            next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
             done = bool(next_state.done)
             dataset.append(
                 StepRecord(

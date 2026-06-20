@@ -17,6 +17,7 @@ from textworld.mvw.kb import load_portal_kb
 from textworld.mvw.scenarios import normalize_novelty_scenario
 from textworld.mvw.scenarios import novelty_goal_facts
 from textworld.mvw.scenarios import novelty_metadata
+from textworld.mvw.scenarios import pick_magic_box_object
 
 
 @dataclass(frozen=True)
@@ -262,8 +263,9 @@ def _build_stage_5_magic_box(seed: int) -> Game:
     magic_box.add_property("closed")
     lab.add(magic_box)
 
-    apple = M.new(type="f", name="apple")
-    magic_box.add(apple)
+    target_object_name = pick_magic_box_object(seed)
+    target_object = M.new(type="f", name=target_object_name)
+    magic_box.add(target_object)
 
     walkthrough = ["open magic box"]
     win_event = Event(conditions={M.new_fact("open", magic_box)})
@@ -271,7 +273,9 @@ def _build_stage_5_magic_box(seed: int) -> Game:
     game = _finalize_stage(M.build(), "stage_5", walkthrough)
     game.metadata["novelty"] = novelty_metadata("magic_box")
     game.metadata["novelty_scenario"] = "magic_box"
-    game.metadata["custom_goal_facts"] = list(novelty_goal_facts("stage_5", "magic_box"))
+    game.metadata["container_name"] = "magic box"
+    game.metadata["target_object"] = target_object_name
+    game.metadata["custom_goal_facts"] = list(novelty_goal_facts("stage_5", "magic_box", game.metadata))
     return game
 
 

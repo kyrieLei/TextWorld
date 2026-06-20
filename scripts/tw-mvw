@@ -9,6 +9,7 @@ from textworld.mvw.dataset import load_dataset
 from textworld.mvw.dataset import save_dataset
 from textworld.mvw.eval import evaluate_benchmark
 from textworld.mvw.eval import evaluate_counterfactuals
+from textworld.mvw.eval import evaluate_patch_transfer
 from textworld.mvw.learning import dump_training_report
 from textworld.mvw.learning import split_records
 from textworld.mvw.learning import summarize_training_run
@@ -66,6 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
     benchmark_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
 
+    transfer_cmd = subparsers.add_parser("transfer", help="Discover a novelty patch on one seed and reuse it on another seed.")
+    transfer_cmd.add_argument("--stage", default="stage_5", help="Novelty stage id.")
+    transfer_cmd.add_argument("--known-stage", default="stage_4", help="Highest rule stage currently known before expansion.")
+    transfer_cmd.add_argument("--discovery-seed", type=int, default=1234, help="Seed used to discover the novelty patch.")
+    transfer_cmd.add_argument("--eval-seed", type=int, default=1235, help="Held-out seed used to test patch reuse.")
+    transfer_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
+
     return parser
 
 
@@ -112,6 +120,10 @@ def main() -> int:
 
     if args.command == "benchmark":
         print(report_to_json(evaluate_benchmark(args.known_stage, novelty_stage=args.novelty_stage, seed=args.seed, novelty_scenario=args.novelty_scenario)))
+        return 0
+
+    if args.command == "transfer":
+        print(report_to_json(evaluate_patch_transfer(stage=args.stage, base_known_stage=args.known_stage, discovery_seed=args.discovery_seed, eval_seed=args.eval_seed, novelty_scenario=args.novelty_scenario)))
         return 0
 
     print(report_to_json(evaluate_retention(args.known_stage, seed=args.seed)))

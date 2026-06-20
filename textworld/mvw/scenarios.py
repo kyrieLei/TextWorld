@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable
+from dataclasses import dataclass
 from typing import Optional
 
 from textworld.core import GameState
@@ -10,6 +10,13 @@ from textworld.mvw.models import fact_to_str
 
 
 NOVELTY_SCENARIOS = ("portal", "magic_box")
+MAGIC_BOX_OBJECTS = ("apple", "carrot", "potato")
+
+
+@dataclass(frozen=True)
+class ScenarioBindings:
+    target_object: Optional[str] = None
+    container_name: Optional[str] = None
 
 
 def normalize_novelty_scenario(scenario: Optional[str]) -> str:
@@ -39,25 +46,52 @@ def _add_fact(facts: list[Proposition], name: str, *args: tuple[str, str]) -> No
         facts.append(proposition)
 
 
-def apply_novelty_runtime(state: GameState, command: str, novelty_scenario: Optional[str]) -> GameState:
+def scenario_bindings(metadata: Optional[dict]) -> ScenarioBindings:
+    metadata = metadata or {}
+    return ScenarioBindings(
+        target_object=metadata.get("target_object"),
+        container_name=metadata.get("container_name"),
+    )
+
+
+def pick_magic_box_object(seed: int) -> str:
+    return MAGIC_BOX_OBJECTS[seed % len(MAGIC_BOX_OBJECTS)]
+
+
+def apply_novelty_runtime(state: GameState, command: str, novelty_scenario: Optional[str], metadata: Optional[dict] = None) -> GameState:
     scenario = normalize_novelty_scenario(novelty_scenario)
     if scenario != "magic_box":
         return state
 
+    bindings = scenario_bindings(metadata)
     command = command.strip().lower()
-    if command != "open magic box":
+    container_name = (bindings.container_name or "magic box").lower()
+    if command != "open {}".format(container_name):
         return state
 
     facts = list(state["facts"] or [])
-    if _has_fact(facts, "open", "magic box") and _has_fact(facts, "in", "apple", "magic box"):
-        _add_fact(facts, "golden", ("apple", "f"))
-        _add_fact(facts, "transformed", ("apple", "f"))
-        state["facts"] = facts
+    if not _has_fact(facts, "open", container_name):
+        return state
+
+    target_object = bindings.target_object
+    for fact in list(facts):
+        if fact.name != "in" or fact.arguments[1].name != container_name:
+            continue
+
+        obj_name = fact.arguments[0].name
+        if target_object is not None and obj_name != target_object:
+            continue
+
+        obj_type = fact.arguments[0].type
+        _add_fact(facts, "golden", (obj_name, obj_type))
+        _add_fact(facts, "transformed", (obj_name, obj_type))
+
+    state["facts"] = facts
 
     return state
 
 
-def novelty_goal_facts(stage: str, novelty_scenario: Optional[str]) -> tuple[str, ...]:
+def novelty_goal_facts(stage: str, novelty_scenario: Optional[str], metadata: Optional[dict] = None) -> tuple[str, ...]:
     if stage != "stage_5":
         return ()
 
@@ -65,11 +99,17 @@ def novelty_goal_facts(stage: str, novelty_scenario: Optional[str]) -> tuple[str
     if scenario == "portal":
         return ("at(P, garden)", "in(apple, I)")
 
-    return ("golden(apple)", "transformed(apple)")
+    bindings = scenario_bindings(metadata)
+    target_object = bindings.target_object or "apple"
+    return (
+        "golden({})".format(target_object),
+        "transformed({})".format(target_object),
+    )
 
 
-def apply_custom_goal(state: GameState, stage: str, novelty_scenario: Optional[str]) -> GameState:
-    goal_facts = novelty_goal_facts(stage, novelty_scenario)
+def apply_custom_goal(state: GameState, stage: str, novelty_scenario: Optional[str], metadata: Optional[dict] = None) -> GameState:
+    metadata = metadata or {}
+    goal_facts = tuple(metadata.get("custom_goal_facts", ())) or novelty_goal_facts(stage, novelty_scenario, metadata)
     if not goal_facts:
         return state
 
@@ -101,4 +141,4 @@ def novelty_rules_summary(novelty_scenario: Optional[str]) -> tuple[str, ...]:
     if scenario == "portal":
         return ("use portal => move player to linked room",)
 
-    return ("open magic box with apple inside => add golden(apple) and transformed(apple)",)
+    return ("open magic box with object inside => add golden(x) and transformed(x)",)
