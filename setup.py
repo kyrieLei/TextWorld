@@ -66,6 +66,7 @@ setup(
         "scripts/tw-stats",
         "scripts/tw-extract",
         "scripts/tw-view",
+        "scripts/tw-mvw",
     ],
     zip_safe=False,
     long_description=open("README.md").read(),

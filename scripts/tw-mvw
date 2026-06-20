@@ -1,0 +1,52 @@
+#!/usr/bin/env python
+
+import argparse
+import os
+
+from textworld.mvw.runner import build_curriculum
+from textworld.mvw.runner import evaluate_game
+from textworld.mvw.runner import evaluate_retention
+from textworld.mvw.runner import report_to_json
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Minimum Viable World experiments for TextWorld.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    build_cmd = subparsers.add_parser("build", help="Build the staged curriculum as JSON games.")
+    build_cmd.add_argument("--output-dir", required=True, help="Where to save the generated stage files.")
+    build_cmd.add_argument("--seed", type=int, default=1234, help="Base seed for generation.")
+
+    eval_cmd = subparsers.add_parser("evaluate", help="Run the symbolic world model on a stage walkthrough.")
+    eval_cmd.add_argument("--stage", required=True, help="Stage id, for example stage_3.")
+    eval_cmd.add_argument("--known-stage", help="Highest rule stage currently known by the model.")
+    eval_cmd.add_argument("--seed", type=int, default=1234, help="Stage seed.")
+    eval_cmd.add_argument("--expand", action="store_true", help="Apply the rule-based expansion planner when novelty is detected.")
+
+    retention_cmd = subparsers.add_parser("retention", help="Evaluate old-world retention up to a stage.")
+    retention_cmd.add_argument("--known-stage", required=True, help="Highest rule stage currently known by the model.")
+    retention_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.command == "build":
+        os.makedirs(args.output_dir, exist_ok=True)
+        for path in build_curriculum(args.output_dir, seed=args.seed):
+            print(path)
+        return 0
+
+    if args.command == "evaluate":
+        print(report_to_json(evaluate_game(args.stage, known_stage=args.known_stage, seed=args.seed, expand=args.expand)))
+        return 0
+
+    print(report_to_json(evaluate_retention(args.known_stage, seed=args.seed)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
