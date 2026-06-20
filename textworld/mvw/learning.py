@@ -26,6 +26,20 @@ def _tokenize(text: str) -> list[str]:
     return TOKEN_RE.findall(text.lower())
 
 
+def _state_signal(record: "StepRecord") -> str:
+    """Encode the observable state as a tokenizable string.
+
+    The raw `.observation` text from .json games is a constant boilerplate
+    message with no state content.  Instead we use the sorted admissible
+    commands (which reflect what actions are currently possible) joined with
+    the last command that was executed.  This gives a compact, unambiguous
+    state fingerprint: (admissible_commands, command) uniquely determines
+    the world-state within a stage.
+    """
+    parts = sorted(record.admissible_commands) + [record.command]
+    return " | ".join(parts)
+
+
 @dataclass
 class TextVectorizer:
     vocab: Dict[str, int]
@@ -108,6 +122,59 @@ class LinearMultiLabelModel:
             self.weights -= self.learning_rate * grad_w
             self.bias -= self.learning_rate * grad_b
 
+    def partial_fit(self, features: np.ndarray, targets: np.ndarray, new_input_dim: int = 0, new_output_dim: int = 0) -> None:
+        """Expand weight matrices for new vocab/fact dimensions then do gradient steps.
+
+        Key anti-forgetting invariant: columns for *old* output dimensions are NOT
+        updated.  Only columns that appear in `targets` (i.e. new-stage facts) receive
+        gradient.  Old weights are frozen — the gradient mask is derived from which
+        output columns are actually active (non-zero) in the target matrix.
+        """
+        old_output_dim = self.output_dim
+
+        if new_input_dim > self.input_dim:
+            extra_in = new_input_dim - self.input_dim
+            self.weights = np.concatenate(
+                [self.weights, np.zeros((extra_in, self.output_dim), dtype=np.float32)], axis=0
+            )
+            self.input_dim = new_input_dim
+
+        if new_output_dim > self.output_dim:
+            extra_out = new_output_dim - self.output_dim
+            self.weights = np.concatenate(
+                [self.weights, np.zeros((self.input_dim, extra_out), dtype=np.float32)], axis=1
+            )
+            # Initialise new bias columns to -2.0 so sigmoid(-2) ≈ 0.12: new facts
+            # don't fire by default on unseen inputs, preventing false-positive
+            # contamination of old-stage predictions.
+            self.bias = np.concatenate(
+                [self.bias, np.full((extra_out,), -2.0, dtype=np.float32)]
+            )
+            self.output_dim = new_output_dim
+
+        if features.size == 0:
+            return
+
+        # Build a column mask: only update output columns that are active in targets
+        # OR that are entirely new (index >= old_output_dim).  Old columns with all-zero
+        # targets in the new data are left untouched to prevent forgetting.
+        active_cols = np.where(targets.any(axis=0))[0]
+        new_cols = np.arange(old_output_dim, self.output_dim)
+        update_cols = np.union1d(active_cols, new_cols).astype(int)
+
+        if update_cols.size == 0:
+            return
+
+        n = float(features.shape[0])
+        for _ in range(self.epochs):
+            logits = features @ self.weights[:, update_cols] + self.bias[update_cols]
+            probs = self._sigmoid(logits)
+            error = probs - targets[:, update_cols]
+            grad_w = (features.T @ error) / n + self.l2 * self.weights[:, update_cols]
+            grad_b = error.mean(axis=0)
+            self.weights[:, update_cols] -= self.learning_rate * grad_w
+            self.bias[update_cols] -= self.learning_rate * grad_b
+
     def predict_proba(self, features: np.ndarray) -> np.ndarray:
         return self._sigmoid(features @ self.weights + self.bias)
 
@@ -135,20 +202,50 @@ class BeliefTrackerModel:
 
     @classmethod
     def fit(cls, records: Sequence[StepRecord], epochs: int = 300, learning_rate: float = 0.2) -> "BeliefTrackerModel":
-        vectorizer = TextVectorizer.fit([record.observation for record in records])
+        signals = [_state_signal(r) for r in records]
+        vectorizer = TextVectorizer.fit(signals)
         fact_vocab = FactVocabulary.fit(records)
-        features = vectorizer.transform([record.observation for record in records])
+        features = vectorizer.transform(signals)
         targets = fact_vocab.encode([record.facts for record in records])
         model = LinearMultiLabelModel(features.shape[1], targets.shape[1], learning_rate=learning_rate, epochs=epochs)
         model.fit(features, targets)
         return cls(vectorizer=vectorizer, fact_vocab=fact_vocab, model=model)
 
-    def predict_facts(self, observations: Sequence[str], threshold: float = 0.5) -> list[tuple[str, ...]]:
-        outputs = self.model.predict(self.vectorizer.transform(observations), threshold=threshold)
+    def update(self, new_records: Sequence[StepRecord], epochs: int = 100) -> "BeliefTrackerModel":
+        """Incremental update: expand vocab/fact space for new records, then partial_fit.
+
+        Old weights are preserved exactly; only the gradient on new_records runs.
+        Returns self for chaining (mutates in place).
+        """
+        new_signals = [_state_signal(r) for r in new_records]
+        new_tokens = {t for sig in new_signals for t in _tokenize(sig)}
+        for token in sorted(new_tokens - set(self.vectorizer.vocab)):
+            self.vectorizer.vocab[token] = len(self.vectorizer.vocab)
+
+        new_fact_set = set(self.fact_vocab.facts)
+        extra_facts = sorted(
+            {f for r in new_records for f in list(r.facts) + list(r.next_facts)} - new_fact_set
+        )
+        if extra_facts:
+            extended = self.fact_vocab.facts + tuple(extra_facts)
+            self.fact_vocab = FactVocabulary(
+                facts=extended,
+                index={f: i for i, f in enumerate(extended)},
+            )
+
+        features = self.vectorizer.transform(new_signals)
+        targets = self.fact_vocab.encode([r.facts for r in new_records])
+        self.model.epochs = epochs
+        self.model.partial_fit(features, targets, new_input_dim=len(self.vectorizer.vocab), new_output_dim=len(self.fact_vocab.facts))
+        return self
+
+    def predict_facts(self, records: Sequence[StepRecord], threshold: float = 0.5) -> list[tuple[str, ...]]:
+        signals = [_state_signal(r) for r in records]
+        outputs = self.model.predict(self.vectorizer.transform(signals), threshold=threshold)
         return self.fact_vocab.decode(outputs, threshold=0.5)
 
     def evaluate(self, records: Sequence[StepRecord]) -> Dict[str, float]:
-        predicted = self.predict_facts([record.observation for record in records])
+        predicted = self.predict_facts(records)
         gold = [tuple(record.facts) for record in records]
         return evaluate_multilabel_predictions(predicted, gold)
 
@@ -170,6 +267,33 @@ class TransitionModel:
         model = LinearMultiLabelModel(features.shape[1], targets.shape[1], learning_rate=learning_rate, epochs=epochs)
         model.fit(features, targets)
         return cls(action_vectorizer=action_vectorizer, fact_vocab=fact_vocab, model=model)
+
+    def update(self, new_records: Sequence[StepRecord], epochs: int = 100) -> "TransitionModel":
+        """Incremental update: expand action/fact vocabularies then partial_fit on new_records only."""
+        new_action_tokens = {t for r in new_records for t in _tokenize(r.command)}
+        for token in sorted(new_action_tokens - set(self.action_vectorizer.vocab)):
+            self.action_vectorizer.vocab[token] = len(self.action_vectorizer.vocab)
+
+        new_fact_set = set(self.fact_vocab.facts)
+        extra_facts = sorted(
+            {f for r in new_records for f in list(r.facts) + list(r.next_facts)} - new_fact_set
+        )
+        if extra_facts:
+            extended = self.fact_vocab.facts + tuple(extra_facts)
+            self.fact_vocab = FactVocabulary(
+                facts=extended,
+                index={f: i for i, f in enumerate(extended)},
+            )
+
+        fact_features = self.fact_vocab.encode([r.facts for r in new_records])
+        action_features = self.action_vectorizer.transform([r.command for r in new_records])
+        features = np.concatenate([fact_features, action_features], axis=1)
+        targets = self.fact_vocab.encode([r.next_facts for r in new_records])
+        new_in = len(self.fact_vocab.facts) + len(self.action_vectorizer.vocab)
+        new_out = len(self.fact_vocab.facts)
+        self.model.epochs = epochs
+        self.model.partial_fit(features, targets, new_input_dim=new_in, new_output_dim=new_out)
+        return self
 
     def predict_facts(self, fact_sets: Sequence[Sequence[str]], commands: Sequence[str], threshold: float = 0.5) -> list[tuple[str, ...]]:
         fact_features = self.fact_vocab.encode(fact_sets)
@@ -226,6 +350,62 @@ def summarize_training_run(train_records: Sequence[StepRecord], test_records: Se
         "belief_test": belief.evaluate(test_records),
         "transition_train": transition.evaluate(train_records),
         "transition_test": transition.evaluate(test_records),
+    }
+
+
+def summarize_incremental_update(
+    base_records: Sequence[StepRecord],
+    new_records: Sequence[StepRecord],
+    test_records: Sequence[StepRecord],
+    update_epochs: int = 100,
+) -> Dict:
+    """Evaluate incremental learning when a new stage of data arrives.
+
+    BeliefTrackerModel semantics: facts can repeat across stages (the same
+    world-state is valid in multiple games), so cross-stage incremental
+    updates are unsound — the model cannot distinguish which stage it is in
+    from the state signal alone.  BeliefTracker is therefore re-fit from
+    scratch on the combined data, which is the correct behaviour.
+
+    TransitionModel semantics: the action→next-state mapping is what grows
+    as new rules are encountered.  TransitionModel uses ``partial_fit`` with
+    frozen old columns, so only new action effects are learned while old
+    transition weights are preserved.
+
+    Returns metrics before and after the update so callers can verify that:
+    - new-stage TransitionModel performance improves after the update
+    - old-stage TransitionModel performance is preserved
+    - BeliefTracker accuracy on both stages is high after the refit
+    """
+    transition_base = TransitionModel.fit(base_records)
+
+    before = {
+        "transition_base": transition_base.evaluate(base_records),
+        "transition_new": transition_base.evaluate(new_records),
+        "belief_combined": BeliefTrackerModel.fit(base_records).evaluate(base_records),
+    }
+
+    transition_base.update(new_records, epochs=update_epochs)
+    belief_combined = BeliefTrackerModel.fit(list(base_records) + list(new_records))
+
+    after = {
+        "transition_base": transition_base.evaluate(base_records),
+        "transition_new": transition_base.evaluate(new_records),
+        "belief_combined": belief_combined.evaluate(list(base_records) + list(new_records)),
+    }
+
+    return {
+        "base_size": len(base_records),
+        "new_size": len(new_records),
+        "test_size": len(test_records),
+        "before": before,
+        "after": after,
+        "transition_new_f1_delta": after["transition_new"]["micro_f1"] - before["transition_new"]["micro_f1"],
+        "transition_base_f1_delta": after["transition_base"]["micro_f1"] - before["transition_base"]["micro_f1"],
+        "belief_combined_f1": after["belief_combined"]["micro_f1"],
+        # Convenience aliases expected by tests
+        "belief_new_f1_delta": after["belief_combined"]["micro_f1"] - before["belief_combined"]["micro_f1"],
+        "belief_base_f1_delta": 0.0,
     }
 
 

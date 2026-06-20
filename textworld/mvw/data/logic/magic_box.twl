@@ -1,0 +1,31 @@
+# magic_box
+# A magic box is a container (type c) with a special open rule: when opened,
+# every object inside gains the golden and transformed properties.
+# The open/magic_box rule has 4 preconditions vs open/c with 3, so it takes
+# priority when tw.py sorts valid_actions by precondition count before dispatch.
+type magic_box : c {
+    predicates {
+        golden(o);
+        transformed(o);
+    }
+
+    rules {
+        open/magic_box :: $at(P, r) & $at(magic_box, r) & closed(magic_box) & $in(o, magic_box) -> open(magic_box) & golden(o) & transformed(o);
+    }
+
+    inform7 {
+        type {
+            kind :: "magic box";
+            definition :: "magic boxes are openable and fixed in place. magic boxes are usually closed.";
+        }
+
+        predicates {
+            golden(o) :: "The {o} is golden";
+            transformed(o) :: "The {o} is transformed";
+        }
+
+        commands {
+            open/magic_box :: "open {magic_box}" :: "opening the {magic_box}";
+        }
+    }
+}

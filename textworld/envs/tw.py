@@ -95,8 +95,17 @@ class TextWorldEnv(textworld.Environment):
         if self.request_infos.last_action and self._last_action is not None:
             self.state["last_action"] = self._inform7.get_human_readable_action(self._last_action)
 
-        self.state["_valid_actions"] = self._game_progression.valid_actions
-        self.state["_valid_commands"] = self._inform7.gen_commands_from_actions(self._game_progression.valid_actions)
+        # Sort actions so the most-specific rule (most preconditions) comes first.
+        # When two rules produce the same command string (e.g. open/c and open/magic_box
+        # both map to "open magic box"), the first occurrence wins in step(); prefer the
+        # more-specific rule so that type-specific postconditions (golden, transformed) fire.
+        _sorted_actions = sorted(
+            self._game_progression.valid_actions,
+            key=lambda a: len(a.preconditions),
+            reverse=True,
+        )
+        self.state["_valid_actions"] = _sorted_actions
+        self.state["_valid_commands"] = self._inform7.gen_commands_from_actions(_sorted_actions)
         # To guarantee the order from one execution to another, we sort the commands.
         # Remove any potential duplicate commands (they would lead to the same result anyway).
         self.state["admissible_commands"] = sorted(set(self.state["_valid_commands"]))
@@ -132,7 +141,7 @@ class TextWorldEnv(textworld.Environment):
         try:
             # Find the action corresponding to the command.
             idx = self._prev_state["_valid_commands"].index(command)
-            self._last_action = self._game_progression.valid_actions[idx]
+            self._last_action = self._prev_state["_valid_actions"][idx]
             # An action that affects the state of the game.
             self._game_progression.update(self._last_action)
             self._current_winning_policy = self._game_progression.winning_policy

@@ -1,0 +1,27 @@
+# bridge_button
+# A button frees a blocked directional edge between two rooms.
+type button : t {
+    predicates {
+        bridge_target(button, r, r);
+    }
+
+    rules {
+        push/button :: $at(P, r) & $at(button, r) & $bridge_target(button, r, r')
+                     -> free(r, r') & free(r', r);
+    }
+
+    inform7 {
+        type {
+            kind :: "button";
+            definition :: "buttons are fixed in place.";
+        }
+
+        predicates {
+            bridge_target(button, r, r') :: "";
+        }
+
+        commands {
+            push/button :: "push {button}" :: "pushing the {button}";
+        }
+    }
+}

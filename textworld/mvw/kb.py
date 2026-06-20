@@ -24,3 +24,13 @@ def load_augmented_kb(extra_logic_files: Iterable[str], grammar_path: str = TEXT
 def load_portal_kb() -> KnowledgeBase:
     extra_logic = pjoin(dirname(__file__), "data", "logic", "portal.twl")
     return load_augmented_kb([extra_logic])
+
+
+def load_magic_box_kb() -> KnowledgeBase:
+    extra_logic = pjoin(dirname(__file__), "data", "logic", "magic_box.twl")
+    return load_augmented_kb([extra_logic])
+
+
+def load_bridge_button_kb() -> KnowledgeBase:
+    extra_logic = pjoin(dirname(__file__), "data", "logic", "bridge_button.twl")
+    return load_augmented_kb([extra_logic])

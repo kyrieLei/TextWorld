@@ -17,10 +17,12 @@ from textworld.mvw.curriculum import normalize_stage
 from textworld.mvw.models import ConsistencyVerifier
 from textworld.mvw.models import NoveltyDetector
 from textworld.mvw.models import OracleStateTracker
+from textworld.mvw.models import ExpansionContext
+from textworld.mvw.models import ReplayExample
 from textworld.mvw.models import RuleBasedExpansionPlanner
 from textworld.mvw.models import SymbolicTransitionModel
-from textworld.mvw.models import WorldPatch
 from textworld.mvw.models import WorldContext
+from textworld.mvw.models import WorldPatch
 from textworld.mvw.models import fact_to_str
 from textworld.mvw.scenarios import apply_custom_goal
 from textworld.mvw.scenarios import apply_novelty_runtime
@@ -50,6 +52,26 @@ def _save_temp_game(game) -> str:
     return path
 
 
+def _planner_context(
+    context: WorldContext,
+    known_stage: str,
+    patches: Sequence[WorldPatch],
+    belief_before,
+    command: str,
+    observed_after,
+    replay_examples: Sequence[ReplayExample],
+) -> ExpansionContext:
+    return ExpansionContext(
+        world_context=context,
+        known_stage=int(known_stage.split("_")[-1]),
+        current_patches=tuple(patches),
+        belief_before=belief_before,
+        command=command,
+        observed_after=observed_after,
+        replay_examples=tuple(replay_examples),
+    )
+
+
 def evaluate_game(
     stage: Union[int, str],
     known_stage: Optional[Union[int, str]] = None,
@@ -58,7 +80,9 @@ def evaluate_game(
     llm_proposer=None,
     novelty_scenario: str = None,
     patches: Sequence[WorldPatch] = (),
+    planner=None,
 ) -> Dict:
+    """Run one game episode and return a trace report."""
     stage_id = normalize_stage(stage)
     game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
     game_path = _save_temp_game(game)
@@ -69,12 +93,14 @@ def evaluate_game(
     context = WorldContext(game)
     model_stage = normalize_stage(known_stage) if known_stage is not None else stage_id
     model = SymbolicTransitionModel(context, int(model_stage.split("_")[-1]), patches=patches)
-    planner = RuleBasedExpansionPlanner()
+    active_planner = planner if planner is not None else RuleBasedExpansionPlanner()
 
     current_state = env.reset()
     belief = tracker.observe(current_state.facts)
     commands = list(game.metadata.get("walkthrough", current_state.policy_commands or []))
     traces = []
+    active_patches = list(patches)
+    replay_examples: list[ReplayExample] = []
 
     for command in commands:
         predicted, supported = model.predict(belief, command)
@@ -95,8 +121,12 @@ def evaluate_game(
                     llm_hypothesis = llm_proposer.propose(signal)
                 except Exception as exc:
                     llm_hypothesis = "LLM proposer failed: {}".format(exc)
-            patch = planner.propose(signal)
+            patch = active_planner.propose(
+                signal,
+                _planner_context(context, model_stage, active_patches, belief, command, observed, replay_examples),
+            )
             if patch is not None:
+                active_patches.append(patch)
                 model = model.with_patch(patch)
                 predicted, supported = model.predict(belief, command)
                 predicted_violations = verifier.check(predicted)
@@ -115,9 +145,17 @@ def evaluate_game(
                 "observed_violations": [violation.code for violation in verifier.check(observed)],
                 "patch": patch.kind if patch is not None else None,
                 "llm_hypothesis": llm_hypothesis,
-                "player_room": next((fact_to_str(fact) for fact in observed.facts if fact.name == "at" and fact.arguments[0].name == "P"), None),
+                "player_room": next(
+                    (
+                        fact_to_str(fact)
+                        for fact in observed.facts
+                        if fact.name == "at" and fact.arguments[0].name == "P"
+                    ),
+                    None,
+                ),
             }
         )
+        replay_examples.append(ReplayExample(belief, command, observed))
         belief = observed
         current_state = next_state
 

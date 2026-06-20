@@ -17,9 +17,13 @@ from textworld.mvw.curriculum import STAGE_ORDER
 from textworld.mvw.curriculum import build_stage_game
 from textworld.mvw.curriculum import normalize_stage
 from textworld.mvw.models import BeliefState
+from textworld.mvw.models import DataDrivenExpansionPlanner
+from textworld.mvw.models import ExpansionContext
 from textworld.mvw.models import NoveltyDetector
 from textworld.mvw.models import OracleStateTracker
+from textworld.mvw.models import ReplayExample
 from textworld.mvw.models import RuleBasedExpansionPlanner
+from textworld.mvw.models import SearchExpansionPlanner
 from textworld.mvw.models import SymbolicTransitionModel
 from textworld.mvw.models import WorldContext
 from textworld.mvw.models import WorldPatch
@@ -27,6 +31,7 @@ from textworld.mvw.models import fact_to_str
 from textworld.mvw.runner import evaluate_game
 from textworld.mvw.scenarios import apply_custom_goal
 from textworld.mvw.scenarios import apply_novelty_runtime
+from textworld.mvw.scenarios import NOVELTY_SCENARIOS
 from textworld.mvw.scenarios import normalize_novelty_scenario
 
 
@@ -81,27 +86,64 @@ def _make_model(stage: str, known_stage: str, patches: Sequence[WorldPatch] = ()
     return SymbolicTransitionModel(context, int(known_stage.split("_")[-1]), patches), context
 
 
-def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union[int, str]] = None, expand: bool = False, seed: int = 1234, novelty_scenario: str = None) -> Dict:
+def _probes_for_game(game, stage_id: str, scenario: Optional[str]) -> tuple[CounterfactualProbe, ...]:
+    probe_key = "{}:{}".format(stage_id, scenario) if scenario is not None else stage_id
+    if probe_key == "stage_5:bridge_button":
+        trigger = game.metadata.get("trigger_name", "button")
+        return (
+            CounterfactualProbe(
+                "stage_5",
+                "push {}".format(trigger),
+                True,
+                "Pushing the button should open a blocked path.",
+            ),
+        )
+
+    return COUNTERFACTUAL_PROBES.get(probe_key, ())
+
+
+def _planner_context(
+    game,
+    context: WorldContext,
+    known_stage_id: str,
+    patches: Sequence[WorldPatch],
+    belief_before: BeliefState,
+    command: str,
+    observed_after: BeliefState,
+    replay_examples: Sequence[ReplayExample],
+) -> ExpansionContext:
+    return ExpansionContext(
+        world_context=context,
+        known_stage=int(known_stage_id.split("_")[-1]),
+        current_patches=tuple(patches),
+        belief_before=belief_before,
+        command=command,
+        observed_after=observed_after,
+        replay_examples=tuple(replay_examples),
+    )
+
+
+def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union[int, str]] = None, expand: bool = False, seed: int = 1234, novelty_scenario: str = None, planner=None) -> Dict:
     stage_id = normalize_stage(stage)
     known_stage_id = normalize_stage(known_stage) if known_stage is not None else stage_id
     scenario = normalize_novelty_scenario(novelty_scenario) if stage_id == "stage_5" else None
-    probe_key = "{}:{}".format(stage_id, scenario) if scenario is not None else stage_id
-    probes = COUNTERFACTUAL_PROBES.get(probe_key, ())
+    game = build_stage_game(stage_id, seed=seed, novelty_scenario=scenario)
+    probes = _probes_for_game(game, stage_id, scenario)
     if not probes:
         return {"stage": stage_id, "counterfactual_accuracy": 1.0, "probes": []}
-
-    game = build_stage_game(stage_id, seed=seed, novelty_scenario=scenario)
     env = textworld.start(_save_temp_game(game), request_infos=_request_infos())
     state = env.reset()
     tracker = OracleStateTracker()
     detector = NoveltyDetector()
-    planner = RuleBasedExpansionPlanner()
+    active_planner = planner if planner is not None else RuleBasedExpansionPlanner()
     context = WorldContext(game)
     model = SymbolicTransitionModel(context, int(known_stage_id.split("_")[-1]))
     belief = tracker.observe(state.facts)
+    replay_examples: list[ReplayExample] = []
 
     # Optionally preload the expansion patch using the first detected novelty on the walkthrough.
     if expand:
+        active_patches: list[WorldPatch] = []
         for command in game.metadata.get("walkthrough", []):
             predicted, supported = model.predict(belief, command)
             next_state, _, _ = env.step(command)
@@ -109,10 +151,15 @@ def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union
             next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
             observed = tracker.observe(next_state.facts)
             signal = detector.detect(command, predicted, observed, supported, ())
-            patch = planner.propose(signal)
+            patch = active_planner.propose(
+                signal,
+                _planner_context(game, context, known_stage_id, active_patches, belief, command, observed, replay_examples),
+            )
             if patch is not None:
+                active_patches.append(patch)
                 model = model.with_patch(patch)
                 break
+            replay_examples.append(ReplayExample(belief, command, observed))
             belief = observed
 
         env.close()
@@ -155,9 +202,29 @@ def evaluate_counterfactuals(stage: Union[int, str], known_stage: Optional[Union
     }
 
 
-def evaluate_novelty_accommodation(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None) -> Dict:
-    before = evaluate_game(stage, known_stage=base_known_stage, seed=seed, expand=False, novelty_scenario=novelty_scenario)
-    after = evaluate_game(stage, known_stage=base_known_stage, seed=seed, expand=True, novelty_scenario=novelty_scenario)
+def evaluate_novelty_accommodation(
+    stage: Union[int, str] = "stage_5",
+    base_known_stage: Union[int, str] = "stage_4",
+    seed: int = 1234,
+    novelty_scenario: str = None,
+    planner=None,
+) -> Dict:
+    before = evaluate_game(
+        stage,
+        known_stage=base_known_stage,
+        seed=seed,
+        expand=False,
+        novelty_scenario=novelty_scenario,
+        planner=planner,
+    )
+    after = evaluate_game(
+        stage,
+        known_stage=base_known_stage,
+        seed=seed,
+        expand=True,
+        novelty_scenario=novelty_scenario,
+        planner=planner,
+    )
 
     def _performance(report: Dict) -> float:
         if not report["won"]:
@@ -177,18 +244,19 @@ def evaluate_novelty_accommodation(stage: Union[int, str] = "stage_5", base_know
     }
 
 
-def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None) -> Dict:
+def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None, planner=None) -> Dict:
     stage_id = normalize_stage(stage)
     game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
     env = textworld.start(_save_temp_game(game), request_infos=_request_infos())
     tracker = OracleStateTracker()
     detector = NoveltyDetector()
-    planner = RuleBasedExpansionPlanner()
+    active_planner = planner if planner is not None else RuleBasedExpansionPlanner()
     context = WorldContext(game)
     model = SymbolicTransitionModel(context, int(normalize_stage(base_known_stage).split("_")[-1]))
     state = env.reset()
     belief = tracker.observe(state.facts)
     patches = []
+    replay_examples: list[ReplayExample] = []
 
     for command in game.metadata.get("walkthrough", []):
         predicted, supported = model.predict(belief, command)
@@ -197,10 +265,14 @@ def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stag
         next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
         observed = tracker.observe(next_state.facts)
         signal = detector.detect(command, predicted, observed, supported, ())
-        patch = planner.propose(signal)
+        patch = active_planner.propose(
+            signal,
+            _planner_context(game, context, normalize_stage(base_known_stage), patches, belief, command, observed, replay_examples),
+        )
         if patch is not None:
             patches.append(patch)
             model = model.with_patch(patch)
+        replay_examples.append(ReplayExample(belief, command, observed))
         belief = observed
 
     env.close()
@@ -222,18 +294,19 @@ def evaluate_rule_minimality(stage: Union[int, str] = "stage_5", base_known_stag
     }
 
 
-def discover_rule_patches(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None) -> Dict:
+def discover_rule_patches(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None, planner=None) -> Dict:
     stage_id = normalize_stage(stage)
     game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
     env = textworld.start(_save_temp_game(game), request_infos=_request_infos())
     tracker = OracleStateTracker()
     detector = NoveltyDetector()
-    planner = RuleBasedExpansionPlanner()
+    active_planner = planner if planner is not None else RuleBasedExpansionPlanner()
     context = WorldContext(game)
     model = SymbolicTransitionModel(context, int(normalize_stage(base_known_stage).split("_")[-1]))
     state = env.reset()
     belief = tracker.observe(state.facts)
     patches: list[WorldPatch] = []
+    replay_examples: list[ReplayExample] = []
 
     for command in game.metadata.get("walkthrough", []):
         predicted, supported = model.predict(belief, command)
@@ -242,10 +315,14 @@ def discover_rule_patches(stage: Union[int, str] = "stage_5", base_known_stage: 
         next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
         observed = tracker.observe(next_state.facts)
         signal = detector.detect(command, predicted, observed, supported, ())
-        patch = planner.propose(signal)
+        patch = active_planner.propose(
+            signal,
+            _planner_context(game, context, normalize_stage(base_known_stage), patches, belief, command, observed, replay_examples),
+        )
         if patch is not None and all(existing.kind != patch.kind for existing in patches):
             patches.append(patch)
             model = model.with_patch(patch)
+        replay_examples.append(ReplayExample(belief, command, observed))
         belief = observed
 
     env.close()
@@ -277,8 +354,9 @@ def evaluate_patch_transfer(
     discovery_seed: int = 1234,
     eval_seed: int = 1235,
     novelty_scenario: str = None,
+    planner=None,
 ) -> Dict:
-    discovered = discover_rule_patches(stage=stage, base_known_stage=base_known_stage, seed=discovery_seed, novelty_scenario=novelty_scenario)
+    discovered = discover_rule_patches(stage=stage, base_known_stage=base_known_stage, seed=discovery_seed, novelty_scenario=novelty_scenario, planner=planner)
     before = evaluate_game(stage, known_stage=base_known_stage, seed=eval_seed, expand=False, novelty_scenario=novelty_scenario)
     after = evaluate_game(
         stage,
@@ -336,7 +414,7 @@ def _candidate_commands(game, state) -> list[str]:
     return commands
 
 
-def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str]] = None, expand: bool = False, seed: int = 1234, max_depth: int = 4, novelty_scenario: str = None) -> Dict:
+def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str]] = None, expand: bool = False, seed: int = 1234, max_depth: int = 4, novelty_scenario: str = None, planner=None) -> Dict:
     stage_id = normalize_stage(stage)
     known_stage_id = normalize_stage(known_stage) if known_stage is not None else stage_id
     game = build_stage_game(stage_id, seed=seed, novelty_scenario=novelty_scenario)
@@ -344,22 +422,29 @@ def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str
     initial_state = env.reset()
     tracker = OracleStateTracker()
     detector = NoveltyDetector()
-    planner = RuleBasedExpansionPlanner()
+    active_planner = planner if planner is not None else RuleBasedExpansionPlanner()
     context = WorldContext(game)
     model = SymbolicTransitionModel(context, int(known_stage_id.split("_")[-1]))
     initial_belief = tracker.observe(initial_state.facts)
 
     if expand:
+        active_patches: list[WorldPatch] = []
+        replay_examples: list[ReplayExample] = []
         for command in game.metadata.get("walkthrough", []):
             predicted, supported = model.predict(initial_belief, command)
             next_state, _, _ = env.step(command)
             next_state = apply_novelty_runtime(next_state, command, game.metadata.get("novelty_scenario"), game.metadata)
             next_state = apply_custom_goal(next_state, stage_id, game.metadata.get("novelty_scenario"), game.metadata)
             observed = tracker.observe(next_state.facts)
-            patch = planner.propose(detector.detect(command, predicted, observed, supported, ()))
+            patch = active_planner.propose(
+                detector.detect(command, predicted, observed, supported, ()),
+                _planner_context(game, context, known_stage_id, active_patches, initial_belief, command, observed, replay_examples),
+            )
             if patch is not None:
+                active_patches.append(patch)
                 model = model.with_patch(patch)
                 break
+            replay_examples.append(ReplayExample(initial_belief, command, observed))
             initial_belief = observed
 
         env.close()
@@ -403,9 +488,9 @@ def plan_with_model(stage: Union[int, str], known_stage: Optional[Union[int, str
     }
 
 
-def evaluate_planning_improvement(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None) -> Dict:
-    before = plan_with_model(stage, known_stage=base_known_stage, expand=False, seed=seed, novelty_scenario=novelty_scenario)
-    after = plan_with_model(stage, known_stage=base_known_stage, expand=True, seed=seed, novelty_scenario=novelty_scenario)
+def evaluate_planning_improvement(stage: Union[int, str] = "stage_5", base_known_stage: Union[int, str] = "stage_4", seed: int = 1234, novelty_scenario: str = None, planner=None) -> Dict:
+    before = plan_with_model(stage, known_stage=base_known_stage, expand=False, seed=seed, novelty_scenario=novelty_scenario, planner=planner)
+    after = plan_with_model(stage, known_stage=base_known_stage, expand=True, seed=seed, novelty_scenario=novelty_scenario, planner=planner)
     return {
         "stage": normalize_stage(stage),
         "novelty_scenario": novelty_scenario,
@@ -418,7 +503,15 @@ def evaluate_planning_improvement(stage: Union[int, str] = "stage_5", base_known
     }
 
 
-def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, str] = "stage_5", seed: int = 1234, novelty_scenario: str = None) -> Dict:
+def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, str] = "stage_5", seed: int = 1234, novelty_scenario: str = None, planner=None) -> Dict:
+    """Run the full MVW benchmark.
+
+    Args:
+        planner: Expansion planner to use throughout.  Defaults to
+            :class:`RuleBasedExpansionPlanner`.  Pass a
+            :class:`DataDrivenExpansionPlanner` instance to evaluate purely
+            data-driven rule induction end-to-end.
+    """
     known_stage_id = normalize_stage(known_stage)
     retention = {
         "known_stage": known_stage_id,
@@ -427,11 +520,17 @@ def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, s
             for idx, stage in enumerate(STAGE_ORDER[: int(known_stage_id.split("_")[-1]) + 1])
         ),
     }
-    accommodation = evaluate_novelty_accommodation(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario)
-    counterfactual = evaluate_counterfactuals(novelty_stage, known_stage=known_stage_id, expand=True, seed=seed, novelty_scenario=novelty_scenario)
-    rule_minimality = evaluate_rule_minimality(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario)
-    planning = evaluate_planning_improvement(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario)
-    transfer = evaluate_patch_transfer(stage=novelty_stage, base_known_stage=known_stage_id, discovery_seed=seed, eval_seed=seed + 1, novelty_scenario=novelty_scenario)
+    accommodation = evaluate_novelty_accommodation(
+        stage=novelty_stage,
+        base_known_stage=known_stage_id,
+        seed=seed,
+        novelty_scenario=novelty_scenario,
+        planner=planner,
+    )
+    counterfactual = evaluate_counterfactuals(novelty_stage, known_stage=known_stage_id, expand=True, seed=seed, novelty_scenario=novelty_scenario, planner=planner)
+    rule_minimality = evaluate_rule_minimality(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario, planner=planner)
+    planning = evaluate_planning_improvement(stage=novelty_stage, base_known_stage=known_stage_id, seed=seed, novelty_scenario=novelty_scenario, planner=planner)
+    transfer = evaluate_patch_transfer(stage=novelty_stage, base_known_stage=known_stage_id, discovery_seed=seed, eval_seed=seed + 1, novelty_scenario=novelty_scenario, planner=planner)
     consistency = accommodation["after"]["observed_violation_count"] / max(1, accommodation["after"]["steps"])
     return {
         "known_stage": known_stage_id,
@@ -451,4 +550,38 @@ def evaluate_benchmark(known_stage: Union[int, str], novelty_stage: Union[int, s
             "planning": planning,
             "transfer": transfer,
         },
+    }
+
+
+def evaluate_novelty_suite(
+    known_stage: Union[int, str] = "stage_4",
+    novelty_stage: Union[int, str] = "stage_5",
+    seed: int = 1234,
+    novelty_scenarios: Sequence[str] = NOVELTY_SCENARIOS,
+    planners: Optional[Dict[str, object]] = None,
+) -> Dict:
+    planner_map = planners or {
+        "rule_based": RuleBasedExpansionPlanner(),
+        "data_driven": DataDrivenExpansionPlanner(),
+        "search": SearchExpansionPlanner(),
+    }
+    results: Dict[str, Dict] = {}
+    for scenario in novelty_scenarios:
+        results[scenario] = {}
+        for planner_name, planner_obj in planner_map.items():
+            results[scenario][planner_name] = evaluate_benchmark(
+                known_stage,
+                novelty_stage=novelty_stage,
+                seed=seed,
+                novelty_scenario=scenario,
+                planner=planner_obj,
+            )
+
+    return {
+        "known_stage": normalize_stage(known_stage),
+        "novelty_stage": normalize_stage(novelty_stage),
+        "seed": seed,
+        "scenarios": list(novelty_scenarios),
+        "planners": list(planner_map.keys()),
+        "results": results,
     }

@@ -14,10 +14,27 @@ from textworld.mvw.learning import dump_training_report
 from textworld.mvw.learning import split_records
 from textworld.mvw.learning import summarize_training_run
 from textworld.mvw.llm import OpenAICompatibleHypothesisProposer
+from textworld.mvw.report import format_ablation_markdown
+from textworld.mvw.report import generate_ablation_report
 from textworld.mvw.runner import build_curriculum
 from textworld.mvw.runner import evaluate_game
 from textworld.mvw.runner import evaluate_retention
 from textworld.mvw.runner import report_to_json
+
+
+PLANNER_CHOICES = ("rule_based", "data_driven", "search")
+
+
+def _planner_from_name(name: str):
+    if name == "data_driven":
+        from textworld.mvw.models import DataDrivenExpansionPlanner
+        return DataDrivenExpansionPlanner()
+
+    if name == "search":
+        from textworld.mvw.models import SearchExpansionPlanner
+        return SearchExpansionPlanner()
+
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_cmd.add_argument("--num-games", type=int, default=16, help="Number of games per stage.")
     collect_cmd.add_argument("--seed", type=int, default=1234, help="Base seed for collection.")
     collect_cmd.add_argument("--policy-mix", type=float, default=0.7, help="Probability of following the oracle policy when available.")
-    collect_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
+    collect_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal, magic_box, or bridge_button.")
 
     train_cmd = subparsers.add_parser("train", help="Train learned belief-tracking and transition baselines from a JSONL dataset.")
     train_cmd.add_argument("--dataset", required=True, help="JSONL dataset collected with the collect command.")
@@ -48,7 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmd.add_argument("--llm-base-url", help="Optional OpenAI-compatible endpoint, e.g. a local Qwen3 Instruct server.")
     eval_cmd.add_argument("--llm-model", default="Qwen/Qwen3-0.6B", help="Model name for the OpenAI-compatible endpoint.")
     eval_cmd.add_argument("--llm-api-key", help="Optional API key for the OpenAI-compatible endpoint.")
-    eval_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
+    eval_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal, magic_box, or bridge_button.")
+    eval_cmd.add_argument("--planner", choices=PLANNER_CHOICES, default="rule_based", help="Expansion planner to use when --expand is set.")
 
     retention_cmd = subparsers.add_parser("retention", help="Evaluate old-world retention up to a stage.")
     retention_cmd.add_argument("--known-stage", required=True, help="Highest rule stage currently known by the model.")
@@ -59,20 +77,31 @@ def build_parser() -> argparse.ArgumentParser:
     counterfactual_cmd.add_argument("--known-stage", help="Highest rule stage currently known by the model.")
     counterfactual_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
     counterfactual_cmd.add_argument("--expand", action="store_true", help="Apply novelty expansion before probing.")
-    counterfactual_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
+    counterfactual_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal, magic_box, or bridge_button.")
+    counterfactual_cmd.add_argument("--planner", choices=PLANNER_CHOICES, default="rule_based", help="Expansion planner used for novelty induction.")
 
     benchmark_cmd = subparsers.add_parser("benchmark", help="Run the idea.md metric suite for a known stage.")
     benchmark_cmd.add_argument("--known-stage", required=True, help="Highest rule stage currently known by the model.")
     benchmark_cmd.add_argument("--novelty-stage", default="stage_5", help="Stage used for novelty accommodation.")
     benchmark_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
-    benchmark_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
+    benchmark_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal, magic_box, or bridge_button.")
+    benchmark_cmd.add_argument("--planner", choices=PLANNER_CHOICES, default="rule_based", help="Expansion planner used across the benchmark.")
 
     transfer_cmd = subparsers.add_parser("transfer", help="Discover a novelty patch on one seed and reuse it on another seed.")
     transfer_cmd.add_argument("--stage", default="stage_5", help="Novelty stage id.")
     transfer_cmd.add_argument("--known-stage", default="stage_4", help="Highest rule stage currently known before expansion.")
     transfer_cmd.add_argument("--discovery-seed", type=int, default=1234, help="Seed used to discover the novelty patch.")
     transfer_cmd.add_argument("--eval-seed", type=int, default=1235, help="Held-out seed used to test patch reuse.")
-    transfer_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal or magic_box.")
+    transfer_cmd.add_argument("--novelty-scenario", help="Optional scenario for stage_5: portal, magic_box, or bridge_button.")
+    transfer_cmd.add_argument("--planner", choices=PLANNER_CHOICES, default="rule_based", help="Expansion planner used during discovery.")
+
+    report_cmd = subparsers.add_parser("report", help="Run an ablation matrix across novelty scenarios and planners.")
+    report_cmd.add_argument("--known-stage", default="stage_4", help="Highest rule stage currently known by the model.")
+    report_cmd.add_argument("--novelty-stage", default="stage_5", help="Stage used for novelty accommodation.")
+    report_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
+    report_cmd.add_argument("--scenario", action="append", dest="scenarios", help="Optional scenario filter. Repeatable.")
+    report_cmd.add_argument("--planner", action="append", dest="planners", choices=PLANNER_CHOICES, help="Planner(s) to include. Repeatable.")
+    report_cmd.add_argument("--format", choices=("json", "markdown"), default="markdown", help="Output format.")
 
     return parser
 
@@ -111,19 +140,33 @@ def main() -> int:
                 model=args.llm_model,
                 api_key=args.llm_api_key,
             )
-        print(report_to_json(evaluate_game(args.stage, known_stage=args.known_stage, seed=args.seed, expand=args.expand, llm_proposer=proposer, novelty_scenario=args.novelty_scenario)))
+        print(report_to_json(evaluate_game(args.stage, known_stage=args.known_stage, seed=args.seed, expand=args.expand, llm_proposer=proposer, novelty_scenario=args.novelty_scenario, planner=_planner_from_name(args.planner))))
         return 0
 
     if args.command == "counterfactual":
-        print(report_to_json(evaluate_counterfactuals(args.stage, known_stage=args.known_stage, expand=args.expand, seed=args.seed, novelty_scenario=args.novelty_scenario)))
+        print(report_to_json(evaluate_counterfactuals(args.stage, known_stage=args.known_stage, expand=args.expand, seed=args.seed, novelty_scenario=args.novelty_scenario, planner=_planner_from_name(args.planner))))
         return 0
 
     if args.command == "benchmark":
-        print(report_to_json(evaluate_benchmark(args.known_stage, novelty_stage=args.novelty_stage, seed=args.seed, novelty_scenario=args.novelty_scenario)))
+        print(report_to_json(evaluate_benchmark(args.known_stage, novelty_stage=args.novelty_stage, seed=args.seed, novelty_scenario=args.novelty_scenario, planner=_planner_from_name(args.planner))))
         return 0
 
     if args.command == "transfer":
-        print(report_to_json(evaluate_patch_transfer(stage=args.stage, base_known_stage=args.known_stage, discovery_seed=args.discovery_seed, eval_seed=args.eval_seed, novelty_scenario=args.novelty_scenario)))
+        print(report_to_json(evaluate_patch_transfer(stage=args.stage, base_known_stage=args.known_stage, discovery_seed=args.discovery_seed, eval_seed=args.eval_seed, novelty_scenario=args.novelty_scenario, planner=_planner_from_name(args.planner))))
+        return 0
+
+    if args.command == "report":
+        report = generate_ablation_report(
+            known_stage=args.known_stage,
+            novelty_stage=args.novelty_stage,
+            seed=args.seed,
+            novelty_scenarios=tuple(args.scenarios or ()),
+            planners=tuple(args.planners or PLANNER_CHOICES),
+        )
+        if args.format == "json":
+            print(report_to_json(report))
+        else:
+            print(format_ablation_markdown(report), end="")
         return 0
 
     print(report_to_json(evaluate_retention(args.known_stage, seed=args.seed)))

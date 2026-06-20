@@ -59,6 +59,13 @@ class NoveltySignal:
 
 
 @dataclass(frozen=True)
+class ReplayExample:
+    belief_before: BeliefState
+    command: str
+    observed_after: BeliefState
+
+
+@dataclass(frozen=True)
 class WorldPatch:
     name: str
     kind: str
@@ -70,6 +77,17 @@ class WorldPatch:
     @property
     def complexity(self) -> int:
         return len(self.new_entities) + len(self.new_properties) + len(self.rules)
+
+
+@dataclass(frozen=True)
+class ExpansionContext:
+    world_context: "WorldContext"
+    known_stage: int
+    current_patches: tuple[WorldPatch, ...]
+    belief_before: BeliefState
+    command: str
+    observed_after: BeliefState
+    replay_examples: tuple[ReplayExample, ...] = ()
 
 
 class WorldContext:
@@ -247,6 +265,12 @@ class SymbolicTransitionModel:
                 self._apply_use_portal(facts, cmd.split(" ", 1)[1])
             else:
                 supported = False
+
+        elif cmd.startswith("push "):
+            if any(patch.kind == "switch_open_path" for patch in self.patches):
+                self._apply_push_switch(facts, cmd.split(" ", 1)[1])
+            else:
+                supported = False
         else:
             supported = False
 
@@ -387,7 +411,8 @@ class SymbolicTransitionModel:
         if entity_id is None or not self._has_fact(facts, "open", entity_id):
             return
 
-        if entity_id != "magic box":
+        entity_type = self.context.id_to_type.get(entity_id, "")
+        if entity_id != "magic box" and entity_type != "magic_box":
             return
 
         for fact in list(facts):
@@ -507,6 +532,21 @@ class SymbolicTransitionModel:
                 self._replace_player_room(facts, fact.arguments[2].name)
                 break
 
+    def _apply_push_switch(self, facts: set[Proposition], button_name: str) -> None:
+        button_id = self.context.resolve(button_name)
+        room_id = self._current_room(facts)
+        if button_id is None or room_id is None:
+            return
+
+        bridged_rooms = []
+        for fact in facts:
+            if fact.name == "bridge_target" and fact.arguments[0].name == button_id and fact.arguments[1].name == room_id:
+                bridged_rooms.append(fact.arguments[2].name)
+
+        for target_room in bridged_rooms:
+            self._add_fact(facts, "free", room_id, target_room)
+            self._add_fact(facts, "free", target_room, room_id)
+
 
 class NoveltyDetector:
     def detect(
@@ -531,7 +571,7 @@ class NoveltyDetector:
 
 
 class RuleBasedExpansionPlanner:
-    def propose(self, signal: NoveltySignal) -> Optional[WorldPatch]:
+    def propose(self, signal: NoveltySignal, context: Optional[ExpansionContext] = None) -> Optional[WorldPatch]:
         command = _normalize_name(signal.command)
         if command.startswith("use ") and "portal" in command:
             return WorldPatch(
@@ -540,6 +580,15 @@ class RuleBasedExpansionPlanner:
                 description="Using a portal moves the player along a portal_link edge.",
                 rules=("use portal => move player to linked room",),
                 new_entities=("portal",),
+            )
+
+        if command.startswith("push "):
+            return WorldPatch(
+                name="switch-open-path",
+                kind="switch_open_path",
+                description="Pushing this button opens a linked door/path.",
+                rules=("push switch => open linked door and free the path",),
+                new_entities=("button",),
             )
 
         if command.startswith("open ") and any("gold" in fact for fact in signal.missing_facts):
@@ -552,3 +601,217 @@ class RuleBasedExpansionPlanner:
             )
 
         return None
+
+
+class DataDrivenExpansionPlanner:
+    """Induces a WorldPatch purely from the NoveltySignal without hardcoded if/else.
+
+    Strategy:
+    - Unsupported action → new_entity patch keyed on the verb in the command.
+    - Missing facts that look like property additions (predicate with 1 arg) after an
+      "open" command → transform_on_open patch.
+    - Any other missing facts → generic state-change patch whose rules are derived from
+      the observed missing/unexpected fact strings.
+    """
+
+    # Verbs whose presence in missing facts strongly signals a known patch kind.
+    _LOCATION_PREDICATES = frozenset({"at", "in", "on"})
+
+    def propose(self, signal: NoveltySignal, context: Optional[ExpansionContext] = None) -> Optional[WorldPatch]:
+        if not signal.is_novel:
+            return None
+
+        command = _normalize_name(signal.command)
+        verb = command.split()[0] if command else ""
+
+        # --- portal: unsupported "use X" command ---
+        if signal.unsupported_action and verb == "use":
+            entity = command.split(" ", 1)[1] if " " in command else command
+            return WorldPatch(
+                name="use-{}-transition".format(entity.replace(" ", "-")),
+                kind="portal_transition",
+                description="Using '{}' moves the player to a linked location.".format(entity),
+                rules=("use {} => move player to linked destination".format(entity),),
+                new_entities=(entity,),
+            )
+
+        if signal.unsupported_action and verb == "push":
+            entity = command.split(" ", 1)[1] if " " in command else command
+            return WorldPatch(
+                name="push-{}-opens-path".format(entity.replace(" ", "-")),
+                kind="switch_open_path",
+                description="Pushing '{}' changes access through a linked door.".format(entity),
+                rules=("push {} => open controlled door and free path".format(entity),),
+                new_entities=(entity,),
+            )
+
+        # --- transform-on-open: "open X" produces new 1-arg property facts ---
+        if verb == "open" and signal.missing_facts:
+            new_props = tuple(
+                f for f in signal.missing_facts
+                if "(" in f and f.count(",") == 0 and f.split("(")[0] not in self._LOCATION_PREDICATES
+            )
+            if new_props:
+                prop_names = tuple(sorted({f.split("(")[0] for f in new_props}))
+                rules = tuple(
+                    "open container => add {}(contained_object)".format(p) for p in prop_names
+                )
+                return WorldPatch(
+                    name="transform-on-open",
+                    kind="transform_on_open",
+                    description="Opening this container adds properties: {}.".format(", ".join(prop_names)),
+                    rules=rules,
+                    new_properties=prop_names,
+                )
+
+        # --- generic: derive rules from the diff of missing/unexpected facts ---
+        if signal.missing_facts or signal.unexpected_facts:
+            missing_sample = signal.missing_facts[:3]
+            unexpected_sample = signal.unexpected_facts[:3]
+            rules = tuple(
+                "{} => +{}".format(command, f) for f in missing_sample
+            ) + tuple(
+                "{} => -{}".format(command, f) for f in unexpected_sample
+            )
+            if rules:
+                new_entities = ()
+                if signal.unsupported_action:
+                    entity = command.split(" ", 1)[1] if " " in command else command
+                    new_entities = (entity,)
+                return WorldPatch(
+                    name="data-driven-{}".format(verb or "unknown"),
+                    kind="data_driven",
+                    description="Data-driven patch for '{}': {} missing, {} unexpected facts.".format(
+                        command, len(signal.missing_facts), len(signal.unexpected_facts)
+                    ),
+                    rules=rules,
+                    new_entities=new_entities,
+                )
+
+        return None
+
+
+class SearchExpansionPlanner:
+    """Searches over candidate patches and scores them on novelty fit + replay fit + complexity."""
+
+    def __init__(
+        self,
+        replay_weight: float = 0.5,
+        complexity_weight: float = 0.25,
+        fallback_planner: Optional[DataDrivenExpansionPlanner] = None,
+    ) -> None:
+        self.replay_weight = replay_weight
+        self.complexity_weight = complexity_weight
+        self.fallback_planner = fallback_planner or DataDrivenExpansionPlanner()
+
+    def propose(self, signal: NoveltySignal, context: Optional[ExpansionContext] = None) -> Optional[WorldPatch]:
+        if not signal.is_novel:
+            return None
+
+        if context is None:
+            return self.fallback_planner.propose(signal)
+
+        candidates = self._candidate_patches(signal)
+        if not candidates:
+            return None
+
+        baseline_score = self._score_patch(None, context)
+        scored_candidates = [
+            (
+                self._score_patch(candidate, context),
+                candidate.complexity,
+                candidate.name,
+                candidate,
+            )
+            for candidate in candidates
+        ]
+        best_score, _, _, best_patch = min(scored_candidates, key=lambda item: (item[0], item[1], item[2]))
+        if best_score >= baseline_score:
+            return self.fallback_planner.propose(signal, context)
+
+        return best_patch
+
+    def _candidate_patches(self, signal: NoveltySignal) -> list[WorldPatch]:
+        command = _normalize_name(signal.command)
+        verb = command.split()[0] if command else ""
+        candidates: list[WorldPatch] = []
+
+        fallback = self.fallback_planner.propose(signal)
+        if fallback is not None:
+            candidates.append(fallback)
+
+        if signal.unsupported_action and verb == "push":
+            candidates.append(
+                WorldPatch(
+                    name="search-switch-open-path",
+                    kind="switch_open_path",
+                    description="Search candidate: pushing a control opens a linked door.",
+                    rules=("push switch => open linked door and free path",),
+                    new_entities=("button",),
+                )
+            )
+
+        if verb == "open":
+            prop_names = sorted(
+                {
+                    fact.split("(")[0]
+                    for fact in signal.missing_facts
+                    if "(" in fact and fact.count(",") == 0
+                }
+            )
+            if len(prop_names) > 1:
+                for prop_name in prop_names:
+                    candidates.append(
+                        WorldPatch(
+                            name="search-open-add-{}".format(prop_name),
+                            kind="transform_on_open",
+                            description="Search candidate: opening adds {} to contained object.".format(prop_name),
+                            rules=("open container => add {}(contained_object)".format(prop_name),),
+                            new_properties=(prop_name,),
+                        )
+                    )
+
+                candidates.append(
+                    WorldPatch(
+                        name="search-open-add-combined",
+                        kind="transform_on_open",
+                        description="Search candidate: opening adds all observed properties to contained object.",
+                        rules=tuple(
+                            "open container => add {}(contained_object)".format(prop_name)
+                            for prop_name in prop_names
+                        ),
+                        new_properties=tuple(prop_names),
+                    )
+                )
+
+        deduped: list[WorldPatch] = []
+        seen = set()
+        for patch in candidates:
+            key = (patch.kind, patch.rules, patch.new_entities, patch.new_properties)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(patch)
+        return deduped
+
+    def _score_patch(self, patch: Optional[WorldPatch], context: ExpansionContext) -> float:
+        patches = context.current_patches + ((patch,) if patch is not None else ())
+        model = SymbolicTransitionModel(context.world_context, context.known_stage, patches)
+        novelty_predicted, novelty_supported = model.predict(context.belief_before, context.command)
+        novelty_gap = self._state_gap(novelty_predicted, context.observed_after)
+        unsupported_penalty = 0.0 if novelty_supported else 3.0
+
+        replay_gap = 0.0
+        for example in context.replay_examples:
+            predicted, supported = model.predict(example.belief_before, example.command)
+            replay_gap += self._state_gap(predicted, example.observed_after)
+            if not supported:
+                replay_gap += 2.0
+
+        complexity_penalty = 0.0 if patch is None else self.complexity_weight * patch.complexity
+        return novelty_gap + unsupported_penalty + self.replay_weight * replay_gap + complexity_penalty
+
+    @staticmethod
+    def _state_gap(predicted: BeliefState, observed: BeliefState) -> float:
+        predicted_set = {fact_to_str(fact) for fact in predicted.facts}
+        observed_set = {fact_to_str(fact) for fact in observed.facts}
+        return float(len(predicted_set ^ observed_set))

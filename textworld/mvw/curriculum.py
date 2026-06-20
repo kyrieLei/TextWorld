@@ -13,7 +13,12 @@ from textworld.generator.game import Game
 from textworld.generator.game import GameOptions
 from textworld.generator.game import Event
 from textworld.generator.game import Quest
+from textworld.mvw.kb import load_bridge_button_kb
+from textworld.mvw.kb import load_magic_box_kb
 from textworld.mvw.kb import load_portal_kb
+from textworld.mvw.scenarios import pick_bridge_button_name
+from textworld.mvw.scenarios import pick_bridge_door_name
+from textworld.mvw.scenarios import pick_bridge_object
 from textworld.mvw.scenarios import normalize_novelty_scenario
 from textworld.mvw.scenarios import novelty_goal_facts
 from textworld.mvw.scenarios import novelty_metadata
@@ -90,10 +95,10 @@ STAGE_SPECS: Dict[str, StageSpec] = {
         id="stage_5",
         index=5,
         title="Novelty Scenarios",
-        summary="Introduces exception cases such as portals and transforming containers that require a minimal rule patch.",
-        new_entities=("portal", "magic_box"),
-        new_relations=("portal_link", "golden", "transformed"),
-        new_actions=("use portal", "open magic box"),
+        summary="Introduces exception cases such as portals, transforming containers, and control actions that require a minimal rule patch.",
+        new_entities=("portal", "magic_box", "button"),
+        new_relations=("portal_link", "golden", "transformed", "bridge_target"),
+        new_actions=("use portal", "open magic box", "push button"),
         new_constraints=("novel transitions or transforms must be encoded explicitly",),
         novelty=True,
     ),
@@ -254,12 +259,12 @@ def _build_stage_5_portal(seed: int) -> Game:
 
 
 def _build_stage_5_magic_box(seed: int) -> Game:
-    options = _options(seed)
+    options = _options(seed, load_magic_box_kb())
     M = textworld.GameMaker(options)
     lab = M.new_room("lab")
     M.set_player(lab)
 
-    magic_box = M.new(type="c", name="magic box")
+    magic_box = M.new(type="magic_box", name="magic box")
     magic_box.add_property("closed")
     lab.add(magic_box)
 
@@ -279,12 +284,51 @@ def _build_stage_5_magic_box(seed: int) -> Game:
     return game
 
 
+def _build_stage_5_bridge_button(seed: int) -> Game:
+    options = _options(seed, load_bridge_button_kb())
+    M = textworld.GameMaker(options)
+    lab = M.new_room("lab")
+    vault = M.new_room("vault")
+    M.set_player(lab)
+    M.add_fact("east_of", vault, lab)
+    M.add_fact("west_of", lab, vault)
+
+    button_name = pick_bridge_button_name(seed)
+    button = M.new(type="button", name=button_name)
+    lab.add(button)
+    M.add_fact("bridge_target", button, lab, vault)
+
+    target_object_name = pick_bridge_object(seed)
+    target_object = M.new(type="o", name=target_object_name)
+    vault.add(target_object)
+
+    walkthrough = ["push {}".format(button_name), "go east", "take {}".format(target_object_name)]
+    win_event = Event(
+        conditions={
+            M.new_fact("at", M.player, vault),
+            M.new_fact("in", target_object, M.inventory),
+        }
+    )
+    M.quests = [Quest(win_events=[win_event], commands=walkthrough)]
+    game = _finalize_stage(M.build(), "stage_5", walkthrough)
+    game.metadata["novelty"] = novelty_metadata("bridge_button")
+    game.metadata["novelty_scenario"] = "bridge_button"
+    game.metadata["trigger_name"] = button_name
+    game.metadata["target_room"] = "vault"
+    game.metadata["target_door"] = pick_bridge_door_name(seed)
+    game.metadata["target_object"] = target_object_name
+    game.metadata["custom_goal_facts"] = list(novelty_goal_facts("stage_5", "bridge_button", game.metadata))
+    return game
+
+
 def build_stage_game(stage: Union[int, str], seed: int = 1234, novelty_scenario: str = None) -> Game:
     stage_id = normalize_stage(stage)
     if stage_id == "stage_5":
         scenario = normalize_novelty_scenario(novelty_scenario)
         if scenario == "magic_box":
             return _build_stage_5_magic_box(seed)
+        if scenario == "bridge_button":
+            return _build_stage_5_bridge_button(seed)
         return _build_stage_5_portal(seed)
 
     builders = {
