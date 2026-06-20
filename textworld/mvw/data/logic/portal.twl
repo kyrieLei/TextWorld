@@ -1,0 +1,29 @@
+# portal
+type portal : t {
+    predicates {
+        portal_link(r, portal, r);
+    }
+
+    rules {
+        use/portal :: at(P, r) & $at(portal, r) & $portal_link(r, portal, r') -> at(P, r');
+    }
+
+    constraints {
+        portal1 :: portal_link(r, portal, r') & portal_link(r, portal, r'') -> fail();
+    }
+
+    inform7 {
+        type {
+            kind :: "portal";
+            definition :: "portals are fixed in place.";
+        }
+
+        predicates {
+            portal_link(r, portal, r') :: "";
+        }
+
+        commands {
+            use/portal :: "use {portal}" :: "using the {portal}";
+        }
+    }
+}
