@@ -3,6 +3,14 @@
 import argparse
 import os
 
+from textworld.mvw.dataset import collect_curriculum_dataset
+from textworld.mvw.dataset import collect_stage_dataset
+from textworld.mvw.dataset import load_dataset
+from textworld.mvw.dataset import save_dataset
+from textworld.mvw.learning import dump_training_report
+from textworld.mvw.learning import split_records
+from textworld.mvw.learning import summarize_training_run
+from textworld.mvw.llm import OpenAICompatibleHypothesisProposer
 from textworld.mvw.runner import build_curriculum
 from textworld.mvw.runner import evaluate_game
 from textworld.mvw.runner import evaluate_retention
@@ -17,11 +25,25 @@ def build_parser() -> argparse.ArgumentParser:
     build_cmd.add_argument("--output-dir", required=True, help="Where to save the generated stage files.")
     build_cmd.add_argument("--seed", type=int, default=1234, help="Base seed for generation.")
 
+    collect_cmd = subparsers.add_parser("collect", help="Collect rollout data for a stage or the whole curriculum.")
+    collect_cmd.add_argument("--output", required=True, help="Path to the JSONL dataset.")
+    collect_cmd.add_argument("--stage", help="Optional single stage id.")
+    collect_cmd.add_argument("--num-games", type=int, default=16, help="Number of games per stage.")
+    collect_cmd.add_argument("--seed", type=int, default=1234, help="Base seed for collection.")
+    collect_cmd.add_argument("--policy-mix", type=float, default=0.7, help="Probability of following the oracle policy when available.")
+
+    train_cmd = subparsers.add_parser("train", help="Train learned belief-tracking and transition baselines from a JSONL dataset.")
+    train_cmd.add_argument("--dataset", required=True, help="JSONL dataset collected with the collect command.")
+    train_cmd.add_argument("--train-ratio", type=float, default=0.8, help="Train/test split ratio.")
+
     eval_cmd = subparsers.add_parser("evaluate", help="Run the symbolic world model on a stage walkthrough.")
     eval_cmd.add_argument("--stage", required=True, help="Stage id, for example stage_3.")
     eval_cmd.add_argument("--known-stage", help="Highest rule stage currently known by the model.")
     eval_cmd.add_argument("--seed", type=int, default=1234, help="Stage seed.")
     eval_cmd.add_argument("--expand", action="store_true", help="Apply the rule-based expansion planner when novelty is detected.")
+    eval_cmd.add_argument("--llm-base-url", help="Optional OpenAI-compatible endpoint, e.g. a local Qwen3 Instruct server.")
+    eval_cmd.add_argument("--llm-model", default="Qwen/Qwen3-0.6B", help="Model name for the OpenAI-compatible endpoint.")
+    eval_cmd.add_argument("--llm-api-key", help="Optional API key for the OpenAI-compatible endpoint.")
 
     retention_cmd = subparsers.add_parser("retention", help="Evaluate old-world retention up to a stage.")
     retention_cmd.add_argument("--known-stage", required=True, help="Highest rule stage currently known by the model.")
@@ -40,8 +62,31 @@ def main() -> int:
             print(path)
         return 0
 
+    if args.command == "collect":
+        if args.stage:
+            records = collect_stage_dataset(args.stage, num_games=args.num_games, seed=args.seed, policy_mix=args.policy_mix)
+        else:
+            records = collect_curriculum_dataset(num_games_per_stage=args.num_games, seed=args.seed, policy_mix=args.policy_mix)
+        save_dataset(records, args.output)
+        print(args.output)
+        print("records={}".format(len(records)))
+        return 0
+
+    if args.command == "train":
+        records = load_dataset(args.dataset)
+        train_records, test_records = split_records(records, train_ratio=args.train_ratio)
+        print(dump_training_report(summarize_training_run(train_records, test_records)))
+        return 0
+
     if args.command == "evaluate":
-        print(report_to_json(evaluate_game(args.stage, known_stage=args.known_stage, seed=args.seed, expand=args.expand)))
+        proposer = None
+        if args.llm_base_url:
+            proposer = OpenAICompatibleHypothesisProposer.from_config(
+                base_url=args.llm_base_url,
+                model=args.llm_model,
+                api_key=args.llm_api_key,
+            )
+        print(report_to_json(evaluate_game(args.stage, known_stage=args.known_stage, seed=args.seed, expand=args.expand, llm_proposer=proposer)))
         return 0
 
     print(report_to_json(evaluate_retention(args.known_stage, seed=args.seed)))

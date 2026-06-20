@@ -22,6 +22,10 @@ class OpenAICompatibleHypothesisProposer:
         api_key = os.environ.get("TW_MVW_LLM_API_KEY")
         return cls(model=model, base_url=base_url, api_key=api_key)
 
+    @classmethod
+    def from_config(cls, base_url: str, model: str = "Qwen/Qwen3-0.6B", api_key: Optional[str] = None) -> "OpenAICompatibleHypothesisProposer":
+        return cls(model=model, base_url=base_url, api_key=api_key)
+
     def propose(self, signal: NoveltySignal) -> str:
         url = self.base_url.rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json"}

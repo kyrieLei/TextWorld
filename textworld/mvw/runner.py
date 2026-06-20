@@ -51,6 +51,7 @@ def evaluate_game(
     known_stage: Optional[Union[int, str]] = None,
     seed: int = 1234,
     expand: bool = False,
+    llm_proposer=None,
 ) -> Dict:
     stage_id = normalize_stage(stage)
     game = build_stage_game(stage_id, seed=seed)
@@ -78,7 +79,13 @@ def evaluate_game(
         signal = detector.detect(command, predicted, observed, supported, predicted_violations)
 
         patch = None
+        llm_hypothesis = None
         if expand and signal.is_novel:
+            if llm_proposer is not None:
+                try:
+                    llm_hypothesis = llm_proposer.propose(signal)
+                except Exception as exc:
+                    llm_hypothesis = "LLM proposer failed: {}".format(exc)
             patch = planner.propose(signal)
             if patch is not None:
                 model = model.with_patch(patch)
@@ -98,6 +105,7 @@ def evaluate_game(
                 "predicted_violations": list(signal.predicted_violations),
                 "observed_violations": [violation.code for violation in verifier.check(observed)],
                 "patch": patch.kind if patch is not None else None,
+                "llm_hypothesis": llm_hypothesis,
                 "player_room": next((fact_to_str(fact) for fact in observed.facts if fact.name == "at" and fact.arguments[0].name == "P"), None),
             }
         )
