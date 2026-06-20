@@ -19,6 +19,8 @@ Main entrypoints:
 ./.venv/bin/python scripts/tw-mvw train --dataset /tmp/tw-mvw-stage0.jsonl
 ./.venv/bin/python scripts/tw-mvw evaluate --stage stage_4 --known-stage stage_4
 ./.venv/bin/python scripts/tw-mvw evaluate --stage stage_5 --known-stage stage_4 --expand
+./.venv/bin/python scripts/tw-mvw counterfactual --stage stage_5 --known-stage stage_4 --expand
+./.venv/bin/python scripts/tw-mvw benchmark --known-stage stage_4
 ./.venv/bin/python scripts/tw-mvw retention --known-stage stage_4
 ```
 
@@ -27,7 +29,18 @@ Learning pipeline:
 - `collect`: rollout data with `observation / command / facts / next_facts`
 - `train`: train a learned belief tracker and a learned transition model with NumPy-only multilabel logistic baselines
 - `evaluate`: symbolic baseline plus optional novelty expansion
+- `counterfactual`: explicit counterfactual probes such as "open locked door" or "use portal"
+- `benchmark`: the full metric suite from `idea.md`
 - `retention`: old-world retention audit across stages
+
+`benchmark` reports:
+
+- old-world retention
+- novelty accommodation
+- consistency violation rate
+- rule minimality
+- counterfactual accuracy
+- planning improvement
 
 `textworld.mvw.llm.OpenAICompatibleHypothesisProposer` is optional. It can be pointed at any OpenAI-compatible serving stack, including a locally served Qwen3 Instruct model.
 

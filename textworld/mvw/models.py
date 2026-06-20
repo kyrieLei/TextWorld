@@ -64,6 +64,12 @@ class WorldPatch:
     kind: str
     description: str
     rules: tuple[str, ...]
+    new_entities: tuple[str, ...] = ()
+    new_properties: tuple[str, ...] = ()
+
+    @property
+    def complexity(self) -> int:
+        return len(self.new_entities) + len(self.new_properties) + len(self.rules)
 
 
 class WorldContext:
@@ -515,6 +521,7 @@ class RuleBasedExpansionPlanner:
                 kind="portal_transition",
                 description="Using a portal moves the player along a portal_link edge.",
                 rules=("use portal => move player to linked room",),
+                new_entities=("portal",),
             )
 
         if command.startswith("open ") and any("gold" in fact for fact in signal.missing_facts):
@@ -523,6 +530,7 @@ class RuleBasedExpansionPlanner:
                 kind="transform_on_open",
                 description="Opening this container triggers an object transformation.",
                 rules=("open container => transform contained object",),
+                new_properties=("transform_on_open",),
             )
 
         return None

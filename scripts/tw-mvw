@@ -7,6 +7,8 @@ from textworld.mvw.dataset import collect_curriculum_dataset
 from textworld.mvw.dataset import collect_stage_dataset
 from textworld.mvw.dataset import load_dataset
 from textworld.mvw.dataset import save_dataset
+from textworld.mvw.eval import evaluate_benchmark
+from textworld.mvw.eval import evaluate_counterfactuals
 from textworld.mvw.learning import dump_training_report
 from textworld.mvw.learning import split_records
 from textworld.mvw.learning import summarize_training_run
@@ -49,6 +51,17 @@ def build_parser() -> argparse.ArgumentParser:
     retention_cmd.add_argument("--known-stage", required=True, help="Highest rule stage currently known by the model.")
     retention_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
 
+    counterfactual_cmd = subparsers.add_parser("counterfactual", help="Run explicit counterfactual probes for a stage.")
+    counterfactual_cmd.add_argument("--stage", required=True, help="Stage id.")
+    counterfactual_cmd.add_argument("--known-stage", help="Highest rule stage currently known by the model.")
+    counterfactual_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
+    counterfactual_cmd.add_argument("--expand", action="store_true", help="Apply novelty expansion before probing.")
+
+    benchmark_cmd = subparsers.add_parser("benchmark", help="Run the idea.md metric suite for a known stage.")
+    benchmark_cmd.add_argument("--known-stage", required=True, help="Highest rule stage currently known by the model.")
+    benchmark_cmd.add_argument("--novelty-stage", default="stage_5", help="Stage used for novelty accommodation.")
+    benchmark_cmd.add_argument("--seed", type=int, default=1234, help="Base seed.")
+
     return parser
 
 
@@ -87,6 +100,14 @@ def main() -> int:
                 api_key=args.llm_api_key,
             )
         print(report_to_json(evaluate_game(args.stage, known_stage=args.known_stage, seed=args.seed, expand=args.expand, llm_proposer=proposer)))
+        return 0
+
+    if args.command == "counterfactual":
+        print(report_to_json(evaluate_counterfactuals(args.stage, known_stage=args.known_stage, expand=args.expand, seed=args.seed)))
+        return 0
+
+    if args.command == "benchmark":
+        print(report_to_json(evaluate_benchmark(args.known_stage, novelty_stage=args.novelty_stage, seed=args.seed)))
         return 0
 
     print(report_to_json(evaluate_retention(args.known_stage, seed=args.seed)))

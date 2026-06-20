@@ -10,6 +10,12 @@ from textworld.mvw.dataset import collect_curriculum_dataset
 from textworld.mvw.dataset import collect_stage_dataset
 from textworld.mvw.dataset import load_dataset
 from textworld.mvw.dataset import save_dataset
+from textworld.mvw.eval import evaluate_benchmark
+from textworld.mvw.eval import evaluate_counterfactuals
+from textworld.mvw.eval import evaluate_novelty_accommodation
+from textworld.mvw.eval import evaluate_planning_improvement
+from textworld.mvw.eval import evaluate_rule_minimality
+from textworld.mvw.eval import plan_with_model
 from textworld.mvw.learning import BeliefTrackerModel
 from textworld.mvw.learning import TransitionModel
 from textworld.mvw.learning import dump_training_report
@@ -47,10 +53,16 @@ __all__ = [
     "collect_curriculum_dataset",
     "collect_stage_dataset",
     "dump_training_report",
+    "evaluate_benchmark",
+    "evaluate_counterfactuals",
     "evaluate_game",
+    "evaluate_novelty_accommodation",
+    "evaluate_planning_improvement",
     "evaluate_retention",
+    "evaluate_rule_minimality",
     "load_dataset",
     "normalize_stage",
+    "plan_with_model",
     "save_dataset",
     "split_records",
     "summarize_training_run",
